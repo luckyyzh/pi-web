@@ -342,7 +342,14 @@ export async function POST(req: Request) {
       await packageManager.installAndPersist(source, { local });
     } else if (body.action === "remove") {
       if (!source) return NextResponse.json({ error: "source required" }, { status: 400 });
-      await packageManager.removeAndPersist(source, { local });
+      // 本地路径安装的包在 settings 里存的是相对 agent baseDir 的路径（如 "pi-web-vitals"）。
+      // 卸载时 pi 用 process.cwd() 解析相对路径生成匹配 key，webUI 下 cwd ≠ agent baseDir
+      // → key 不一致导致从 settings 移除失败。仅对本地包先解析出绝对安装路径再卸载；
+      // npm:/git: 包保持原 source（其匹配 key 与 cwd 无关）。
+      const isLocalSource = !source.startsWith("npm:") && !source.startsWith("git:");
+      const piScope = scope === "project" ? "project" : "user";
+      const installedPath = isLocalSource ? packageManager.getInstalledPath(source, piScope) : undefined;
+      await packageManager.removeAndPersist(installedPath ?? source, { local });
     } else if (body.action === "update") {
       await packageManager.update(source);
     } else if (body.action === "disable") {
