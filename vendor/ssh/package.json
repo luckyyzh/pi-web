@@ -1,0 +1,8 @@
+{
+  "name": "ssh",
+  "version": "0.1.0",
+  "description": "SSH 远程执行：通过 --ssh user@host 把 read/write/edit/bash 转发到远程机器执行（需 SSH 密钥免密）。",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": { "extensions": ["./extensions"] }
+}

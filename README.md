@@ -86,6 +86,27 @@ npx @agegr/pi-web@latest
 - **Configure less from the terminal**: manage models, login/API keys, model tests, and skill switches from the web UI.
 - **Use the interface in your language**: switch between the supported UI languages from the top bar.
 
+## Remote SSH Workspace
+
+Work on a remote machine right from the web UI: point pi-web at a remote server, pick a remote working directory, and browse/edit files, check Git status, and run agent tools (read / write / edit / bash) against the remote via SSH.
+
+**Requires the `ssh` pi extension.** It forwards the agent's `read` / `write` / `edit` / `bash` tools to the remote host and maps local shadow directories to remote paths. You need SSH key-based auth (no password prompt) on the target host.
+
+### Enable
+
+1. Click the **Remote** button in the bottom bar (globe icon) to open the SSH config dialog.
+2. If the `ssh` extension is not installed yet, the dialog shows a **one-click install** button — click it (a new session / pi-web restart is needed for the extension to load).
+3. Fill in the SSH target (`user@host`) and, optionally, a remote working directory (empty = login directory). Click **Test connection**, then **Enable remote mode**.
+
+Once enabled, pi-web automatically switches the working directory to the remote one (shown as `⛁ user@host:/path`), the file explorer lists the remote directory, sessions are grouped per remote directory, and Git status/diff run against the remote repository.
+
+### Behavior
+
+- Each remote directory gets its own **shadow root** (`~/.pi/remote/<host>_<hash>`), which keeps sessions, `AGENTS.md`, and project trust isolated per remote path — switching back to a previous directory restores its sessions.
+- **Remote mode** toggles the working directory automatically: enabling switches to the login directory, disabling switches back to your previous local directory.
+- The `ssh` extension also works from the CLI (`pi --ssh user@host[:path]`) and via the `/ssh` command (`/ssh user@host[:path]` to enable, `/ssh off` to exit).
+- SSH config is persisted in `~/.pi/agent/ssh-config.json`.
+
 ## Notes
 
 - **Data directory**: Pi Web reads `~/.pi/agent/sessions` by default. Set `PI_CODING_AGENT_DIR` to point at another pi agent directory.

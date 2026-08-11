@@ -48,6 +48,10 @@ export default function SshConfig({ onClose, onModeChange }: Props) {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; cwd?: string; error?: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // ssh 扩展一键安装状态
+  const [extInstalled, setExtInstalled] = useState<boolean | null>(null);
+  const [extInstalling, setExtInstalling] = useState(false);
+  const [extMessage, setExtMessage] = useState<string | null>(null);
   const hostRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -72,6 +76,34 @@ export default function SshConfig({ onClose, onModeChange }: Props) {
     return () => {
       alive = false;
     };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/ssh/install-extension")
+      .then((r) => r.json())
+      .then((d) => { if (alive) setExtInstalled(!!d.installed); })
+      .catch(() => { if (alive) setExtInstalled(null); });
+    return () => { alive = false; };
+  }, []);
+
+  const installExtension = useCallback(async () => {
+    setExtInstalling(true);
+    setExtMessage(null);
+    try {
+      const res = await fetch("/api/ssh/install-extension", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        setExtMessage(`安装失败：${data.error ?? `HTTP ${res.status}`}`);
+        return;
+      }
+      setExtInstalled(true);
+      setExtMessage("已安装 ssh 扩展。新开会话（或重启 pi-web）后生效，届时 read/write/edit/bash 会转发到远程。");
+    } catch {
+      setExtMessage("安装失败：网络错误");
+    } finally {
+      setExtInstalling(false);
+    }
   }, []);
 
   const save = useCallback(
@@ -150,6 +182,23 @@ export default function SshConfig({ onClose, onModeChange }: Props) {
 
         {/* Body */}
         <div style={{ padding: 14, display: "flex", flexDirection: "column", gap: 12 }}>
+          {extInstalled === false && (
+            <div style={{ fontSize: 12, padding: "8px 10px", borderRadius: 6, border: "1px solid var(--accent-dim, #1f6feb)", background: "rgba(31,111,235,0.08)", color: "var(--text)", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ flex: 1, minWidth: 150 }}>ssh 扩展未安装，远程文件/agent 工具转发需要它。</span>
+              <button
+                onClick={installExtension}
+                disabled={extInstalling}
+                style={{ padding: "5px 12px", borderRadius: 6, border: "none", background: "var(--accent, #1f6feb)", color: "#fff", fontSize: 12, cursor: extInstalling ? "default" : "pointer", fontWeight: 600, opacity: extInstalling ? 0.6 : 1 }}
+              >
+                {extInstalling ? "安装中…" : "一键安装 ssh 扩展"}
+              </button>
+            </div>
+          )}
+          {extMessage && (
+            <div style={{ fontSize: 11, padding: "6px 9px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-panel)", color: extMessage.startsWith("安装失败") ? "var(--err, #f85149)" : "var(--ok, #3fb950)", lineHeight: 1.5 }}>
+              {extMessage}
+            </div>
+          )}
           <div>
             <span style={labelStyle}>SSH 目标（user@host）</span>
             <input
