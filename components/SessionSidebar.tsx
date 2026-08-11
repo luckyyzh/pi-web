@@ -179,6 +179,23 @@ function displayCwd(cwd: string, homeDir?: string): string {
   return (homeDir && cwd.startsWith(homeDir)) ? "~" + cwd.slice(homeDir.length) : cwd;
 }
 
+/** 远程模式下把影子根路径翻译成远程路径显示；本地模式退回 displayCwd */
+function displayPathForMode(
+  cwd: string,
+  homeDir: string | undefined,
+  sshInfo: { enabled: boolean; host: string; path: string; shadowRoot: string | null } | null,
+): string {
+  if (sshInfo?.enabled && sshInfo.shadowRoot && sshInfo.path) {
+    const root = sshInfo.shadowRoot.split("\\").join("/").replace(/\/$/, "");
+    const norm = cwd.split("\\").join("/");
+    if (norm === root) return `⛁ ${sshInfo.host}:${sshInfo.path}`;
+    if (norm.startsWith(root + "/")) {
+      return `⛁ ${sshInfo.host}:${sshInfo.path}${norm.slice(root.length)}`;
+    }
+  }
+  return displayCwd(cwd, homeDir);
+}
+
 /**
  * Path label that ellipsizes on the LEFT, keeping the (most relevant) trailing
  * segments visible: "…orkspace/pi-web". Shows as much of the path as fits
@@ -404,6 +421,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [customPathValue, setCustomPathValue] = useState("");
   const [customPathError, setCustomPathError] = useState<string | null>(null);
   const [customPathValidating, setCustomPathValidating] = useState(false);
+  const [sshInfo, setSshInfo] = useState<{ enabled: boolean; host: string; path: string; shadowRoot: string | null } | null>(null);
+  // 远程模式启用/退出时的切换辅助
+  const prevSshEnabledRef = useRef<boolean | null>(null);
+  const localCwdBeforeSshRef = useRef<string | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   // Worktree switcher state
   const [worktreeState, setWorktreeState] = useState<WorktreeState | null>(null);
@@ -693,6 +714,46 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     : undefined;
   const currentWorktreePath = currentWorktree?.path ?? null;
 
+  // 同步远程模式状态（显示翻译 + DirectoryPicker 远程浏览）
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/ssh/config")
+      .then((r) => r.json())
+      .then((d) => {
+        if (cancelled) return;
+        setSshInfo({
+          enabled: !!d.enabled,
+          host: typeof d.host === "string" ? d.host : "",
+          path: typeof d.path === "string" ? d.path : "",
+          shadowRoot: typeof d.shadowRoot === "string" ? d.shadowRoot : null,
+        });
+      })
+      .catch(() => { if (!cancelled) setSshInfo(null); });
+    return () => { cancelled = true; };
+  }, [refreshKey]);
+
+  // 远程模式启用/退出时自动切换工作目录。不走 selectedCwdProp 同步，因为
+  // 切换会话时该 prop 可能为 null（selectedSession/newSessionCwd 均为空）。
+  useEffect(() => {
+    if (!sshInfo) return;
+    const enabled = sshInfo.enabled;
+    const wasEnabled = prevSshEnabledRef.current ?? false;
+    prevSshEnabledRef.current = enabled;
+    if (enabled === wasEnabled) return;
+    if (enabled) {
+      // 进入远程：记住本地 cwd，切到影子根（文件浏览器随之显示远程目录）
+      if (!localCwdBeforeSshRef.current && selectedCwd) localCwdBeforeSshRef.current = selectedCwd;
+      if (sshInfo.shadowRoot && selectedCwd !== sshInfo.shadowRoot) {
+        setSelectedCwd(sshInfo.shadowRoot);
+      }
+    } else {
+      // 退出远程：切回进入远程前的本地 cwd
+      const back = localCwdBeforeSshRef.current;
+      localCwdBeforeSshRef.current = null;
+      if (back && selectedCwd !== back) setSelectedCwd(back);
+    }
+  }, [sshInfo, selectedCwd]);
+
   const commitCustomPath = useCallback(async (candidate?: string) => {
     const path = (candidate ?? customPathValue).trim();
     if (!path || customPathValidating) return;
@@ -924,6 +985,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         <DirectoryPicker
           busy={customPathValidating}
           error={customPathError}
+          remote={sshInfo?.enabled}
           onCancel={() => {
             setCustomPathOpen(false);
             setCustomPathError(null);
@@ -1044,7 +1106,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           >
             {selectedCwd ? (
               <PathLabel
-                text={displayCwd(selectedProject ?? selectedCwd, homeDir)}
+                text={displayPathForMode(selectedProject ?? selectedCwd, homeDir, sshInfo)}
                 style={{
                   flex: 1,
                   fontFamily: "var(--font-mono)",

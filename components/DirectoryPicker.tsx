@@ -52,9 +52,11 @@ interface Props {
   onSelect: (path: string) => void;
   busy?: boolean;
   error?: string | null;
+  /** 远程模式：浏览/选择远程目录（ssh），隐藏 Windows 盘符选择 */
+  remote?: boolean;
 }
 
-export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Props) {
+export function DirectoryPicker({ onCancel, onSelect, busy = false, error, remote = false }: Props) {
   const { t } = useI18n();
   const [portalTarget, setPortalTarget] = useState<HTMLElement | null>(null);
   const [currentPath, setCurrentPath] = useState("");
@@ -95,7 +97,7 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
   };
   const hasUncommittedPath = pathInput.trim() !== currentPath;
   const canSelect = Boolean(currentPath) && !hasUncommittedPath && !busy;
-  const canNavigateUp = Boolean(parentDirectory) || isWindowsDriveRoot(currentPath);
+  const canNavigateUp = Boolean(parentDirectory) || (!remote && isWindowsDriveRoot(currentPath));
 
   if (!portalTarget) return null;
 
@@ -116,7 +118,8 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
       <div className="directory-picker-panel" style={{ width: 520, maxWidth: "calc(100vw - 16px)", height: "min(620px, calc(100dvh - 16px))", maxHeight: "calc(100dvh - 16px)", display: "flex", flexDirection: "column", overflow: "hidden", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10, boxShadow: "0 8px 32px rgba(0,0,0,0.18)" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0, padding: "12px 18px", borderBottom: "1px solid var(--border)" }}>
           <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ color: "var(--text)", fontWeight: 700, fontSize: 15 }}>{t("directoryPicker.selectDirectory")}</div>
+            <div style={{ color: "var(--text)", fontWeight: 700, fontSize: 15 }}>{remote ? "选择远程目录" : t("directoryPicker.selectDirectory")}</div>
+            {remote && <div style={{ color: "var(--text-dim)", fontSize: 11, marginTop: 2 }}>SSH 远程目录（需密钥免密）</div>}
           </div>
           <button
             type="button"

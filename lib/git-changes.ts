@@ -13,12 +13,42 @@ import {
   parseGitPorcelainV1,
   type GitPorcelainEntry,
 } from "./git-status";
+import {
+  isRemoteModeActive,
+  loadSshConfig,
+  localToRemotePath,
+  shadowRootFor,
+  sshExec,
+  sshReadTextFile,
+} from "./ssh";
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 10_000;
 const GIT_STATUS_MAX_BUFFER = 8 * 1024 * 1024;
 
+/** 远程模式是否生效（且作用于本地路径 —— 影子路径会翻译成远程） */
+function remoteContext(): { active: boolean; host: string; shadowRoot: string | null } {
+  const cfg = loadSshConfig();
+  if (!isRemoteModeActive(cfg)) return { active: false, host: "", shadowRoot: null };
+  return { active: true, host: cfg.host, shadowRoot: shadowRootFor(cfg.host, cfg.path || "/") };
+}
+
 async function git(cwd: string, args: string[], maxBuffer = GIT_STATUS_MAX_BUFFER): Promise<string> {
+  const remote = remoteContext();
+  if (remote.active) {
+    // 本地路径（可能是影子路径）→ 远程路径
+    const remoteBase = localToRemotePath(cwd, loadSshConfig());
+    if (remoteBase) {
+      const quoted = args.map((a) => JSON.stringify(a)).join(" ");
+      const out = await sshExec(
+        remote.host,
+        `cd ${JSON.stringify(remoteBase)} && git ${quoted}`,
+        GIT_TIMEOUT_MS,
+      );
+      return out;
+    }
+    // 路径不在影子根下 → 走本地
+  }
   const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
     timeout: GIT_TIMEOUT_MS,
     maxBuffer,
@@ -27,9 +57,19 @@ async function git(cwd: string, args: string[], maxBuffer = GIT_STATUS_MAX_BUFFE
   return stdout;
 }
 
-async function findRepositoryRoot(cwd: string): Promise<string | null> {
+async function findRepositoryRoot(cwd: string): Promise<{ root: string; shadowRoot: string | null } | null> {
+  const remote = remoteContext();
   try {
-    return (await git(cwd, ["rev-parse", "--show-toplevel"])).trim() || null;
+    if (remote.active) {
+      const remoteBase = localToRemotePath(cwd, loadSshConfig());
+      if (!remoteBase) return null;
+      const root = (await sshExec(remote.host, `cd ${JSON.stringify(remoteBase)} && git rev-parse --show-toplevel`))
+        .trim() || null;
+      if (!root) return null;
+      return { root, shadowRoot: remote.shadowRoot };
+    }
+    const root = (await git(cwd, ["rev-parse", "--show-toplevel"])).trim() || null;
+    return root ? { root, shadowRoot: null } : null;
   } catch {
     return null;
   }
@@ -42,6 +82,14 @@ function isWithinPath(parent: string, target: string): boolean {
 
 function toGitPath(filePath: string): string {
   return filePath.split(path.sep).join("/");
+}
+
+/** 把远程 repo 相对路径映射为"前端可见路径"（本地模式=本地绝对路径；远程模式=影子路径） */
+function filePathFor(entryPath: string, repo: { root: string; shadowRoot: string | null }): string {
+  if (repo.shadowRoot) {
+    return repo.shadowRoot + "/" + entryPath.split("/").join(path.sep);
+  }
+  return path.resolve(repo.root, entryPath);
 }
 
 async function readStatusEntries(repositoryRoot: string): Promise<GitPorcelainEntry[]> {
@@ -58,7 +106,16 @@ async function readTrackedLineStats(
   repositoryRoot: string,
   cwd: string,
 ): Promise<{ additions: number; deletions: number }> {
-  const relativeCwd = toGitPath(path.relative(repositoryRoot, cwd));
+  const remote = remoteContext();
+  let relativeCwd: string;
+  if (remote.active) {
+    const remoteCwd = localToRemotePath(cwd, loadSshConfig());
+    relativeCwd = remoteCwd
+      ? toGitPath(path.relative(repositoryRoot.replace(/\\/g, "/"), remoteCwd))
+      : ".";
+  } else {
+    relativeCwd = toGitPath(path.relative(repositoryRoot, cwd));
+  }
   const pathspec = relativeCwd || ".";
   try {
     const output = await git(repositoryRoot, [
@@ -86,22 +143,38 @@ async function readTrackedLineStats(
   }
 }
 
-function countUntrackedTextLines(filePath: string): number {
+async function countUntrackedTextLines(filePath: string): Promise<number> {
+  const remote = remoteContext();
   try {
-    const stat = fs.lstatSync(filePath);
-    if (!stat.isFile() || stat.size > TEXT_PREVIEW_MAX_BYTES) return 0;
-    const content = fs.readFileSync(filePath);
-    if (hasNullByte(content) || content.length === 0) return 0;
-    const text = content.toString("utf8");
-    return text.endsWith("\n") ? text.split("\n").length - 1 : text.split("\n").length;
+    let content: string | null = null;
+    let isFile = false;
+    if (remote.active) {
+      const remoteFile = localToRemotePath(filePath, loadSshConfig());
+      if (remoteFile) {
+        const q = JSON.stringify(remoteFile);
+        const statOut = await sshExec(remote.host, `stat -c %s ${q} 2>/dev/null`).catch(() => "");
+        const size = parseInt(statOut.trim(), 10);
+        if (!Number.isFinite(size) || size > TEXT_PREVIEW_MAX_BYTES) return 0;
+        const { content: text } = await sshReadTextFile(remote.host, remoteFile).catch(() => ({ content: "", size: 0 }));
+        content = text;
+        isFile = true;
+      }
+    } else {
+      const stat = fs.lstatSync(filePath);
+      if (!stat.isFile() || stat.size > TEXT_PREVIEW_MAX_BYTES) return 0;
+      content = fs.readFileSync(filePath).toString("utf8");
+      isFile = true;
+    }
+    if (!isFile || content === null || content.includes("\0") || content.length === 0) return 0;
+    return content.endsWith("\n") ? content.split("\n").length - 1 : content.split("\n").length;
   } catch {
     return 0;
   }
 }
 
 export async function getGitStatus(cwd: string): Promise<GitStatusResponse> {
-  const repositoryRoot = await findRepositoryRoot(cwd);
-  if (!repositoryRoot) {
+  const repo = await findRepositoryRoot(cwd);
+  if (!repo) {
     return {
       isGitRepository: false,
       repositoryRoot: null,
@@ -112,28 +185,32 @@ export async function getGitStatus(cwd: string): Promise<GitStatusResponse> {
   }
 
   const [entries, trackedLineStats] = await Promise.all([
-    readStatusEntries(repositoryRoot),
-    readTrackedLineStats(repositoryRoot, cwd),
+    readStatusEntries(repo.root),
+    readTrackedLineStats(repo.root, cwd),
   ]);
-  const files = entries.flatMap((entry): GitFileStatus[] => {
-    const filePath = path.resolve(repositoryRoot, entry.path);
-    if (!isWithinPath(cwd, filePath)) return [];
+  const files: GitFileStatus[] = [];
+  for (const entry of entries) {
+    const filePath = filePathFor(entry.path, repo);
+    if (!isWithinPath(cwd, filePath)) continue;
     const classified = classifyGitStatus(entry);
-    return [{
+    files.push({
       filePath,
       ...classified,
       indexStatus: entry.indexStatus,
       worktreeStatus: entry.worktreeStatus,
-    }];
-  });
-  const untrackedAdditions = files.reduce(
-    (total, file) => total + (file.status === "untracked" ? countUntrackedTextLines(file.filePath) : 0),
-    0,
+    });
+  }
+  const untrackedAdditions = await files.reduce(
+    async (accPromise, file) => {
+      const acc = await accPromise;
+      return acc + (file.status === "untracked" ? await countUntrackedTextLines(file.filePath) : 0);
+    },
+    Promise.resolve(0),
   );
 
   return {
     isGitRepository: true,
-    repositoryRoot,
+    repositoryRoot: repo.root,
     files,
     additions: trackedLineStats.additions + untrackedAdditions,
     deletions: trackedLineStats.deletions,
@@ -185,40 +262,68 @@ async function createTrackedFilePatch(
   }
 }
 
-export async function getGitFileDiff(cwd: string, filePath: string): Promise<GitFileDiffResponse> {
-  const repositoryRoot = await findRepositoryRoot(cwd);
-  if (!repositoryRoot || !isWithinPath(repositoryRoot, filePath)) return { supported: false };
+/** 读取文件内容文本；远程模式走 ssh。失败返回 null */
+async function readFileText(filePath: string): Promise<{ text: string; isFile: boolean }> {
+  const remote = remoteContext();
+  try {
+    if (remote.active) {
+      const remoteFile = localToRemotePath(filePath, loadSshConfig());
+      if (remoteFile) {
+        const q = JSON.stringify(remoteFile);
+        const statOut = await sshExec(remote.host, `stat -c %s ${q} 2>/dev/null`).catch(() => "");
+        const size = parseInt(statOut.trim(), 10);
+        if (!Number.isFinite(size) || size > TEXT_PREVIEW_MAX_BYTES) return { text: "", isFile: false };
+        const { content } = await sshReadTextFile(remote.host, remoteFile).catch(() => ({ content: "", size: 0 }));
+        return { text: content, isFile: true };
+      }
+      return { text: "", isFile: false };
+    }
+    const stat = fs.lstatSync(filePath);
+    if (!stat.isFile() || stat.size > TEXT_PREVIEW_MAX_BYTES) return { text: "", isFile: false };
+    return { text: fs.readFileSync(filePath).toString("utf8"), isFile: true };
+  } catch {
+    return { text: "", isFile: false };
+  }
+}
 
-  const resolvedFilePath = path.resolve(filePath);
-  const relativePath = toGitPath(path.relative(repositoryRoot, resolvedFilePath));
-  const entries = await readStatusEntries(repositoryRoot);
+export async function getGitFileDiff(cwd: string, filePath: string): Promise<GitFileDiffResponse> {
+  const repo = await findRepositoryRoot(cwd);
+  if (!repo) return { supported: false };
+
+  const remote = remoteContext();
+  let resolvedFilePath = path.resolve(filePath);
+  let relativePath: string;
+  if (remote.active) {
+    // 远程模式：filePath 必须是影子根下路径 → 转远程路径求相对
+    const remoteFile = localToRemotePath(filePath, loadSshConfig());
+    if (!remoteFile) return { supported: false };
+    relativePath = toGitPath(path.relative(repo.root.replace(/\\/g, "/"), remoteFile));
+    resolvedFilePath = filePath;
+  } else {
+    if (!isWithinPath(repo.root, filePath)) return { supported: false };
+    relativePath = toGitPath(path.relative(repo.root, resolvedFilePath));
+  }
+  const entries = await readStatusEntries(repo.root);
   const entry = entries.find((candidate) => candidate.path === relativePath);
   if (!entry) return { supported: false };
 
   const { status } = classifyGitStatus(entry);
   if (status === "deleted") {
-    const patch = await createTrackedFilePatch(repositoryRoot, relativePath, entry.originalPath);
+    const patch = await createTrackedFilePatch(repo.root, relativePath, entry.originalPath);
     if (!patch?.includes("\n@@ ")) return { supported: false };
     return { supported: true, status, patch };
   }
 
-  let stat: fs.Stats;
-  try {
-    stat = fs.lstatSync(resolvedFilePath);
-  } catch {
-    return { supported: false };
-  }
-  if (!stat.isFile() || stat.size > TEXT_PREVIEW_MAX_BYTES) return { supported: false };
-
-  const currentBuffer = fs.readFileSync(resolvedFilePath);
-  if (hasNullByte(currentBuffer)) return { supported: false };
-  const newContent = currentBuffer.toString("utf8");
+  const fileRead = await readFileText(resolvedFilePath);
+  if (!fileRead.isFile) return { supported: false };
+  const newContent = fileRead.text;
+  if (newContent.includes("\0")) return { supported: false };
 
   let patch: string;
   if (status === "untracked") {
     patch = createAddedFilePatch(relativePath, newContent);
   } else {
-    const trackedPatch = await createTrackedFilePatch(repositoryRoot, relativePath, entry.originalPath);
+    const trackedPatch = await createTrackedFilePatch(repo.root, relativePath, entry.originalPath);
     if (trackedPatch === null) {
       if (status !== "added") return { supported: false };
       patch = createAddedFilePatch(relativePath, newContent);

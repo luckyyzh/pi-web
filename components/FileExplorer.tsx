@@ -540,6 +540,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [pendingConflict, setPendingConflict] = useState<PendingConflict | null>(null);
   const prevCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+  const [sshInfo, setSshInfo] = useState<{ enabled: boolean; host: string; path: string } | null>(null);
   const refreshToken = `${refreshKey ?? 0}:${treeRefreshKey}`;
   const uploadBusy = uploadPhase !== "idle";
 
@@ -692,6 +693,18 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [cwd, refreshKey, treeRefreshKey]);
+
+  // 同步远程模式状态（SshConfig 切换后由 AppShell 触发 refreshKey 变化）
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/ssh/config")
+      .then((r) => r.json())
+      .then((d) => {
+        if (!cancelled) setSshInfo({ enabled: !!d.enabled, host: typeof d.host === "string" ? d.host : "", path: typeof d.path === "string" ? d.path : "" });
+      })
+      .catch(() => { if (!cancelled) setSshInfo(null); });
+    return () => { cancelled = true; };
+  }, [cwd, refreshKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -866,6 +879,20 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
           {gitFiles.map((status) => (
             <ChangeRow key={status.filePath} status={status} cwd={cwd} onOpenFile={onOpenFile} t={t} />
           ))}
+        </div>
+      )}
+
+      {sshInfo?.enabled && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 10px", margin: "0 4px 4px", borderRadius: 6, fontSize: 11, color: "var(--text)", background: "color-mix(in srgb, var(--accent) 12%, var(--bg-panel))", border: "1px solid color-mix(in srgb, var(--accent) 35%, var(--border))" }}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
+            <rect x="2" y="2" width="20" height="8" rx="2" />
+            <rect x="2" y="14" width="20" height="8" rx="2" />
+            <line x1="6" y1="6" x2="6.01" y2="6" />
+            <line x1="6" y1="18" x2="6.01" y2="18" />
+          </svg>
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            远程 {sshInfo.host}{sshInfo.path ? `:${sshInfo.path}` : ""}
+          </span>
         </div>
       )}
 

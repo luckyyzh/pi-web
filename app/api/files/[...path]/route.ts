@@ -18,6 +18,13 @@ import {
   getFileExt,
   getImageMime,
 } from "@/lib/file-types";
+import {
+  isRemoteModeActive,
+  loadSshConfig,
+  localToRemotePath,
+  sshListDir,
+  sshReadTextFile,
+} from "@/lib/ssh";
 import { resolveDirentIsDirectory } from "@/lib/file-dirent";
 import { isFilePathReferencedBySession } from "@/lib/session-file-references";
 import { isApiRequestAllowed } from "@/lib/request-security";
@@ -433,6 +440,34 @@ export async function GET(
       await isFilePathReferencedBySession(filePath, sessionId);
     if (!allowedByRoot && !allowedBySessionReference) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    }
+
+    // ---- 远程模式：list / read（文本）走 SSH，其余暂不支持 ----
+    const sshCfg = loadSshConfig();
+    if (isRemoteModeActive(sshCfg)) {
+      const remotePath = localToRemotePath(filePath, sshCfg);
+      if (!remotePath) {
+        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      }
+      if (type === "list") {
+        const rawEntries = await sshListDir(sshCfg.host, remotePath);
+        const entries = rawEntries
+          .filter((d) => !IGNORED_NAMES.has(d.name) && !IGNORED_SUFFIXES.some((s) => d.name.endsWith(s)))
+          .map((d) => ({ name: d.name, isDir: d.isDir, size: 0, modified: "" }))
+          .sort((a, b) => {
+            if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+            return a.name.localeCompare(b.name);
+          });
+        return NextResponse.json({ entries, path: filePath, remote: remotePath });
+      }
+      if (type === "read") {
+        const { content, size } = await sshReadTextFile(sshCfg.host, remotePath);
+        if (size > TEXT_PREVIEW_MAX_BYTES) {
+          return NextResponse.json({ error: "File too large for preview (>256KB)" }, { status: 413 });
+        }
+        return NextResponse.json({ content, language: getLanguage(filePath), size });
+      }
+      return NextResponse.json({ error: "远程模式下暂不支持该操作（仅支持浏览目录和查看文本）" }, { status: 400 });
     }
 
     let stat: fs.Stats;
