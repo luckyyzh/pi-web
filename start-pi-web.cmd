@@ -15,7 +15,15 @@ REM ============================================================
 REM ---- 0. Check Node.js ----
 where node >nul 2>&1
 if errorlevel 1 (
-  echo [ERROR] Node.js not found. Install Node.js 20+ first: https://nodejs.org
+  echo [ERROR] Node.js not found. Install Node.js 22+ first: https://nodejs.org
+  pause
+  exit /b 1
+)
+node -e "const [m,n]=process.versions.node.split('.').map(Number);process.exit(m<22||(m===22&&n<19)?1:0)" >nul 2>&1
+if errorlevel 1 (
+  echo [ERROR] pi-web requires Node.js 22.19 or newer. Current:
+  node --version
+  echo        Install Node.js 22 LTS or newer: https://nodejs.org
   pause
   exit /b 1
 )
@@ -41,7 +49,7 @@ REM ---- 2. Check / install pi-web dependencies ----
 echo [2/4] Checking pi-web dependencies...
 if not exist "node_modules\@earendil-works\pi-coding-agent" (
   echo [..] Installing pi-web dependencies...
-  call npm install
+  call npm install --include=dev
   if errorlevel 1 (
     echo [ERROR] Failed to install pi-web dependencies.
     pause
