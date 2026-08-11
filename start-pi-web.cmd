@@ -67,14 +67,16 @@ if not exist ".next\BUILD_ID" (
   echo [OK] Build artifacts present.
 )
 
-REM ---- 4. Check port availability ----
+REM ---- 4. Port: free it if occupied (stops the previous pi-web instance) ----
 if not defined PORT set PORT=30141
-netstat -ano | findstr ":%PORT% " >nul 2>&1
+netstat -ano | findstr ":%PORT% " | findstr LISTENING >nul 2>&1
 if not errorlevel 1 (
-  echo [WARN] Port %PORT% is already in use. pi-web may already be running at http://127.0.0.1:%PORT%
-  echo        Close the existing instance first, or set a different PORT.
-  pause
-  exit /b 1
+  echo [WARN] Port %PORT% already in use. Stopping the process holding it...
+  for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":%PORT% " ^| findstr LISTENING') do (
+    echo [..] Killing PID %%p ...
+    taskkill /F /PID %%p >nul 2>&1
+  )
+  ping -n 2 127.0.0.1 >nul
 )
 
 REM ---- 5. Start pi-web ----
