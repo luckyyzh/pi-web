@@ -1,4 +1,13 @@
-@import "tailwindcss";
+@import "tailwindcss" source(none);
+
+/* Tailwind v4: disable auto source detection (which scans process.cwd() and can
+   hit Windows user-dir junctions like Application Data → EPERM during build)
+   and explicitly register the project's content directories (relative to this
+   stylesheet, i.e. app/globals.css). Keep this list in sync with any dir that
+   holds TSX/JSX using Tailwind utilities. */
+@source "../app";
+@source "../components";
+@source "../hooks";
 
 @theme {
   --color-bg: var(--bg);
