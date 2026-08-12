@@ -2,6 +2,18 @@
 setlocal
 cd /d "%~dp0"
 
+REM ---- Warn if the project root is the user home dir (Windows junction EPERM) ----
+if /i "%CD%"=="%USERPROFILE%" (
+  echo [WARN] Project root equals the user home directory (%USERPROFILE%).
+  echo        next build will scan Windows junction dirs in it
+  echo        ^(Application Data, Local Settings, My Documents, ...^) and can
+  echo        fail with "EPERM: operation not permitted, scandir ...".
+  echo        Move the project to a dedicated folder, e.g.
+  echo          %USERPROFILE%\Documents\pi-web   or   C:\pi-web
+  echo        then re-run this script.
+  echo.
+)
+
 REM ============================================================
 REM  Pi Web - one-click launcher
 REM  - Ensures Node.js and the pi coding agent are installed
