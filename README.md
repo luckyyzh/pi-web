@@ -117,6 +117,11 @@ Once enabled, pi-web automatically switches the working directory to the remote 
 - The `ssh` extension also works from the CLI (`pi --ssh user@host[:path]`) and via the `/ssh` command (`/ssh user@host[:path]` to enable, `/ssh off` to exit).
 - SSH config is persisted in `~/.pi/agent/ssh-config.json`.
 
+## Persona & Cache Hit Rate
+
+- **User persona**: use the **Persona** tab (next to System in the top bar) to view/edit your global persona, persisted in `~/.pi/agent/persona.md`. It is injected into the system prompt on every turn by the built-in `persona-injector` extension (auto-installed, no extra plugin needed) and takes effect on your next message.
+- **Cache hit rate**: shown in the top-right token bar (next to input/output/cache-read) as `cacheRead / (input + cacheRead)` for the current session.
+
 ## Notes
 
 - **Agent data**: Pi Web reads pi data from `~/.pi/agent` by default, including session files under `sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`. Set `PI_CODING_AGENT_DIR` to use another pi agent directory.

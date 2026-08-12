@@ -1,0 +1,8 @@
+{
+  "name": "persona-injector",
+  "version": "0.1.0",
+  "description": "User persona injection: appends ~/.pi/agent/persona.md to the system prompt on every turn (pi-web built-in).",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": { "extensions": ["./extensions"] }
+}

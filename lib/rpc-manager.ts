@@ -4,6 +4,7 @@ import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@e
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
 import { resolve } from "path";
+import { ensurePersonaInjectorInstalled } from "./persona";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
@@ -1576,6 +1577,14 @@ export async function startRpcSession(
     // Some extensions access the SDK's global theme even outside the terminal UI.
     initTheme();
     const agentDir = getAgentDir();
+
+    // Ensure the built-in persona injector extension is installed (idempotent).
+    // A newly installed one only loads after the session/pi-web restarts.
+    try {
+      await ensurePersonaInjectorInstalled();
+    } catch (error) {
+      console.error("[pi-web] failed to ensure persona injector:", error instanceof Error ? error.message : error);
+    }
 
     // Determine which tools to pass based on requested toolNames.
     // Since v0.68.0, session creation expects string[] tool names instead of Tool[] instances.

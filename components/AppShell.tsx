@@ -231,13 +231,47 @@ export function AppShell() {
   }, []);
 
   // Single active panel — only one dropdown open at a time
-  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "session" | "language" | null>(null);
+  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "session" | "language" | "persona" | null>(null);
   const [topPanelPos, setTopPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
-  const toggleTopPanel = useCallback((panel: "branches" | "system" | "session" | "language") => {
+  const toggleTopPanel = useCallback((panel: "branches" | "system" | "session" | "language" | "persona") => {
     if (isMobile) setSidebarOpen(false);
     setActiveTopPanel((cur) => cur === panel ? null : panel);
   }, [isMobile]);
+
+  // User persona — displayed in a top panel (persona tab), editable/saved to ~/.pi/agent/persona.md
+  const [personaContent, setPersonaContent] = useState<string | null>(null);
+  const [personaBusy, setPersonaBusy] = useState(false);
+  const [personaSaved, setPersonaSaved] = useState(false);
+  const loadPersona = useCallback(async () => {
+    try {
+      const res = await fetch("/api/persona");
+      const data = (await res.json()) as { content?: unknown };
+      setPersonaContent(typeof data.content === "string" ? data.content : "");
+    } catch {
+      setPersonaContent("");
+    }
+  }, []);
+  useEffect(() => {
+    if (activeTopPanel === "persona" && personaContent === null) void loadPersona();
+  }, [activeTopPanel, personaContent, loadPersona]);
+  const personaHasContent = personaContent !== null && personaContent.trim().length > 0;
+  const savePersona = useCallback(async () => {
+    if (personaContent === null) return;
+    setPersonaBusy(true);
+    try {
+      const res = await fetch("/api/persona", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: personaContent }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setPersonaSaved(true);
+      setTimeout(() => setPersonaSaved(false), 2000);
+    } finally {
+      setPersonaBusy(false);
+    }
+  }, [personaContent]);
 
   const openSessionStatsPanel = useCallback(() => {
     if (isMobile) setSidebarOpen(false);
@@ -1351,6 +1385,32 @@ export function AppShell() {
                 </svg>
                  {!isMobile && <span>{translate("system.label")}</span>}
               </button>
+              <button
+                type="button"
+                onClick={() => toggleTopPanel("persona")}
+                title={translate("persona.title")}
+                aria-label={translate("persona.title")}
+                aria-pressed={activeTopPanel === "persona"}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6,
+                  height: "100%", padding: "0 12px",
+                  background: activeTopPanel === "persona" ? "var(--bg-selected)" : "none",
+                  border: "none",
+                  borderTop: activeTopPanel === "persona" ? "2px solid var(--accent)" : "2px solid transparent",
+                  borderRight: "1px solid var(--border)",
+                  cursor: "pointer",
+                  color: activeTopPanel === "persona" ? "var(--text)" : "var(--text-muted)",
+                  fontSize: 11, whiteSpace: "nowrap", transition: "color 0.1s, background 0.1s",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = activeTopPanel === "persona" ? "var(--text)" : "var(--text-muted)"; }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: personaHasContent ? "var(--accent)" : "var(--text-dim)", flexShrink: 0 }}>
+                  <circle cx="12" cy="8" r="4" />
+                  <path d="M4 21c0-4 3.5-6 8-6s8 2 8 6" />
+                </svg>
+                {!isMobile && <span>{translate("persona.label")}</span>}
+              </button>
             </div>
           )}
           {/* Session stats — right-aligned in top bar */}
@@ -1375,6 +1435,9 @@ export function AppShell() {
                tooltipParts.push(`out: ${tokens.output.toLocaleString(locale)}`);
                tooltipParts.push(`cache read: ${tokens.cacheRead.toLocaleString(locale)}`);
                tooltipParts.push(`cache write: ${tokens.cacheWrite.toLocaleString(locale)}`);
+              if (tokens.input + tokens.cacheRead > 0) {
+                tooltipParts.push(`${translate("stats.cacheHitRate")}: ${((tokens.cacheRead / (tokens.input + tokens.cacheRead)) * 100).toFixed(1)}%`);
+              }
               if (c > 0) tooltipParts.push(`cost: $${c.toFixed(4)}`);
             }
             if (contextUsage?.contextWindow) {
@@ -1436,6 +1499,18 @@ export function AppShell() {
                      {fmt(tokens.cacheRead)}
                   </span>
                 )}
+                {!isMobile && tokens && tokens.input + tokens.cacheRead > 0 && (() => {
+                  const denom = tokens.input + tokens.cacheRead;
+                  const rate = denom > 0 ? (tokens.cacheRead / denom) * 100 : 0;
+                  return (
+                    <span style={{ display: "flex", alignItems: "center", gap: 4 }} title={translate("stats.cacheHitRate")}>
+                      <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M8.5 5a3.5 3.5 0 1 1-1-2.45" /><polyline points="6.5 1.5 8.5 2.5 7.5 4.5" />
+                      </svg>
+                      {rate.toFixed(1)}%
+                    </span>
+                  );
+                })()}
                 {!isMobile && costStr && (
                   <span style={{ display: "flex", alignItems: "center", color: "var(--text)", fontWeight: 500 }}>
                     {costStr}
@@ -1533,6 +1608,60 @@ export function AppShell() {
                        {translate("system.load")}
                     </div>
                   )}
+                </div>
+              )}
+              {activeTopPanel === "persona" && (
+                <div style={{
+                  background: "var(--bg-panel)",
+                  borderBottom: "1px solid var(--border)",
+                  padding: "12px 16px",
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                    <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                      {translate("persona.title")}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void savePersona()}
+                      disabled={personaBusy || personaContent === null}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 6,
+                        padding: "4px 12px",
+                        background: personaSaved ? "var(--accent)" : "var(--bg-hover)",
+                        border: "1px solid var(--border)",
+                        borderRadius: 6,
+                        color: personaSaved ? "#fff" : "var(--text)",
+                        fontSize: 11, fontWeight: 500,
+                        cursor: personaBusy || personaContent === null ? "not-allowed" : "pointer",
+                        opacity: personaBusy || personaContent === null ? 0.6 : 1,
+                      }}
+                    >
+                      {personaBusy ? translate("persona.saving") : personaSaved ? translate("persona.saved") : translate("persona.save")}
+                    </button>
+                  </div>
+                  <textarea
+                    value={personaContent ?? ""}
+                    onChange={(e) => { setPersonaContent(e.target.value); setPersonaSaved(false); }}
+                    placeholder={translate("persona.placeholder")}
+                    spellCheck={false}
+                    style={{
+                      width: "100%",
+                      minHeight: 150,
+                      resize: "vertical",
+                      padding: "10px 12px",
+                      background: "var(--bg-input, rgba(128,128,128,0.06))",
+                      border: "1px solid var(--border)",
+                      borderRadius: 8,
+                      color: "var(--text)",
+                      fontSize: 12,
+                      lineHeight: 1.6,
+                      fontFamily: "var(--font-mono)",
+                      outline: "none",
+                    }}
+                  />
+                  <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-dim)" }}>
+                    {translate("persona.hint")}
+                  </div>
                 </div>
               )}
               {activeTopPanel === "session" && (
