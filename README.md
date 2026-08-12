@@ -33,10 +33,11 @@ Plugins 面板内置 MCP 管理：查看 / 添加 / 删除 / 启用禁用 / 测�
 SSH 配置弹窗内检测到未安装时，提供「一键安装」按钮（安装 pi-web 内嵌的 `vendor/ssh` 副本，离线可用）。
 
 ### 7. 内置扩展（随项目附带）
-三个常用扩展已内嵌在 `vendor/`，Plugins 面板左侧顶部「内置扩展」区域可**一键安装**：
-- **SSH 远程执行**（远程 SSH 工作区依赖）
-- **SearXNG 搜索**（`web_search` 工具）
-- **图片识别**（`describe_image` 工具）
+常用扩展已内置，Plugins 面板左侧顶部「内置扩展」区域可**一键安装**：
+- **SSH 远程执行**（远程 SSH 工作区依赖，内嵌 `vendor/ssh`）
+- **SearXNG 搜索**（`web_search` 工具，内嵌 `vendor/searxng-search`）
+- **图片识别**（`describe_image` 工具，内嵌 `vendor/describe-image`）
+- **MCP 适配器**（`pi-mcp-adapter`，npm 包）
 
 安装是**手动触发、一次性**的（不强制每次启动），装好后可在 Plugins 面板正常卸载。
 
