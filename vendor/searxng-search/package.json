@@ -1,0 +1,8 @@
+{
+  "name": "searxng-search",
+  "version": "0.1.0",
+  "description": "网络搜索：通过自建 SearXNG 端点提供 web_search 工具（X-Search-Token 鉴权）。配置：/web-search config url|token",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": { "extensions": ["./extensions"] }
+}

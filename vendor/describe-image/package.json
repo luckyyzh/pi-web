@@ -1,0 +1,8 @@
+{
+  "name": "describe-image",
+  "version": "0.1.0",
+  "description": "按需识图：给非视觉模型(如 DeepSeek)加识图能力，主模型调 describe_image 工具 + 外部视觉模型(qwen-vl 等)。配置：/describe-image config baseUrl|model|apiKey",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": { "extensions": ["./extensions"] }
+}

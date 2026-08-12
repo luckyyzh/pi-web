@@ -1076,9 +1076,53 @@ export function PluginsConfig({
     }
   }, [cwd]);
 
+  // Bundled extensions (shipped in vendor/) — one-click install, not forced
+  interface BundledExtInfo {
+    name: string;
+    label: string;
+    description: string;
+    bundled: boolean;
+    installed: boolean;
+  }
+  const [bundled, setBundled] = useState<BundledExtInfo[]>([]);
+  const [bundledBusy, setBundledBusy] = useState<string | null>(null);
+  const loadBundled = useCallback(async () => {
+    try {
+      const res = await fetch("/api/bundled-extensions");
+      const data = (await res.json()) as { extensions?: BundledExtInfo[] };
+      setBundled(data.extensions ?? []);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  const installBundled = useCallback(async (name: string) => {
+    setBundledBusy(name);
+    setActionError(null);
+    setActionMessage(null);
+    try {
+      const res = await fetch("/api/bundled-extensions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const next = (await res.json()) as { error?: string };
+      if (!res.ok || next.error) throw new Error(next.error ?? `HTTP ${res.status}`);
+      await loadBundled();
+      await loadPlugins();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBundledBusy(null);
+    }
+  }, [loadBundled, loadPlugins]);
+
   useEffect(() => {
     void loadPlugins();
   }, [loadPlugins]);
+
+  useEffect(() => {
+    void loadBundled();
+  }, [loadBundled]);
 
   const loadMcp = useCallback(async () => {
     setMcpLoading(true);
@@ -1422,6 +1466,45 @@ export function PluginsConfig({
             }}
           >
             <div style={{ flex: 1, overflowY: "auto", padding: "8px 6px" }}>
+              {bundled.length > 0 && (
+                <div style={{ padding: "4px 8px 6px", borderBottom: "1px solid var(--border)", marginBottom: 6 }}>
+                  <div style={{ fontSize: 10, fontWeight: 600, color: "var(--text-dim)", marginBottom: 3 }}>
+                    {t("bundled.title")}
+                  </div>
+                  {bundled.map((ext) => (
+                    <div key={ext.name} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, padding: "3px 0" }}>
+                      <span
+                        style={{ fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, cursor: "default" }}
+                        title={ext.description}
+                      >
+                        {ext.label}
+                      </span>
+                      {ext.installed ? (
+                        <span style={{ fontSize: 10, color: "var(--accent)", flexShrink: 0 }}>{t("bundled.installed")}</span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => void installBundled(ext.name)}
+                          disabled={bundledBusy === ext.name || !ext.bundled}
+                          style={{
+                            flexShrink: 0,
+                            padding: "2px 8px",
+                            background: "var(--bg-hover)",
+                            border: "1px solid var(--border)",
+                            borderRadius: 4,
+                            color: "var(--text)",
+                            fontSize: 10,
+                            cursor: bundledBusy === ext.name || !ext.bundled ? "not-allowed" : "pointer",
+                            opacity: bundledBusy === ext.name || !ext.bundled ? 0.5 : 1,
+                          }}
+                        >
+                          {bundledBusy === ext.name ? t("bundled.installing") : t("bundled.install")}
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
               {loading ? (
                 <div style={{ padding: "10px 8px", fontSize: 12, color: "var(--text-muted)" }}>
                   Loading...
