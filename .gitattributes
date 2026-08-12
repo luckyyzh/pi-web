@@ -1,0 +1,4 @@
+# This fork keeps its own README.md. During upstream merges, always keep the
+# local (ours) version so official README edits never conflict or overwrite it.
+# The driver must be configured (see sync-upstream.cmd: git config merge.ours.driver true).
+README.md merge=ours

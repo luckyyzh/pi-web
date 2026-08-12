@@ -26,6 +26,9 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM ---- Ensure README always keeps the fork version on merge ----
+git config merge.ours.driver true
+
 REM ---- Count ahead/behind vs origin/main ----
 for /f "tokens=1,2" %%x in ('git rev-list --left-right --count main...origin/main') do (
   set LOCAL=%%x
