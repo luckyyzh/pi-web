@@ -53,9 +53,18 @@ const isUserDir = (p: unknown): p is string => {
   return norm === USER_PROFILE || norm.startsWith(USER_PROFILE + "/");
 };
 const _guardReaddir = fs.readdir.bind(fs);
-// @ts-ignore monkeypatch for guard
-fs.readdir = (p: unknown, ...a: any[]) =>
-  isUserDir(p) ? Promise.resolve([]) : (_guardReaddir as any)(p, ...a);
+// @ts-ignore monkeypatch for guard (support both callback and promise callers)
+fs.readdir = (p: unknown, ...args: any[]) => {
+  if (isUserDir(p)) {
+    const last = args[args.length - 1];
+    if (typeof last === "function") {
+      last(null, []);
+      return;
+    }
+    return Promise.resolve([]);
+  }
+  return (_guardReaddir as any)(p, ...args);
+};
 const _guardReaddirSync = fs.readdirSync.bind(fs);
 // @ts-ignore monkeypatch for guard
 fs.readdirSync = (p: unknown, ...a: any[]) =>
