@@ -28,6 +28,37 @@ if (process.env.NEXT_FS_DIAG === "1") {
     if (typeof p === "string" && HIT.test(p)) console.error("[FS-DIAG] readdirSync:", p, "\n" + new Error("stack").stack);
     return (origReaddirSync as any).apply(fs, [p, ...a]);
   };
+  const origScandir = (fs as any).scandir?.bind(fs);
+  if (origScandir) {
+    // @ts-ignore monkeypatch for diagnostics
+    fs.scandir = (p: any, ...a: any[]) => {
+      if (typeof p === "string" && HIT.test(p)) console.error("[FS-DIAG] scandir:", p, "\n" + new Error("stack").stack);
+      return (origScandir as any).apply(fs, [p, ...a]);
+    };
+  }
+}
+
+// Guard (always on): never enumerate Windows legacy user-dir junction dirs.
+// When the project lives on a different drive than the user profile (e.g.
+// project on D: while USERPROFILE is on C:), nft's glob walks the user dir and
+// hits EPERM on these junctions (fs.readdir -> scandir), breaking `next build`.
+// Returning an empty listing is safe: the junctions contain no build inputs.
+const USER_DIR_JUNCTION = /[\\/](?:Application Data|Local Settings|Cookies|My Documents|NetHood|SendTo|Recent|Templates|Favorites|Start Menu|Desktop|My Music|My Pictures|My Videos)(?:[\\/]|$)/i;
+const isUserDirJunction = (p: unknown): p is string =>
+  typeof p === "string" && USER_DIR_JUNCTION.test(p);
+const _guardReaddir = fs.readdir.bind(fs);
+// @ts-ignore monkeypatch for guard
+fs.readdir = (p: unknown, ...a: any[]) =>
+  isUserDirJunction(p) ? Promise.resolve([]) : (_guardReaddir as any)(p, ...a);
+const _guardReaddirSync = fs.readdirSync.bind(fs);
+// @ts-ignore monkeypatch for guard
+fs.readdirSync = (p: unknown, ...a: any[]) =>
+  isUserDirJunction(p) ? [] : (_guardReaddirSync as any)(p, ...a);
+const _guardScandir = (fs as any).scandir?.bind(fs);
+if (_guardScandir) {
+  // @ts-ignore monkeypatch for guard
+  fs.scandir = (p: unknown, ...a: any[]) =>
+    isUserDirJunction(p) ? (async function* () {})() : _guardScandir(p, ...a);
 }
 
 const { version } = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf8")) as { version: string };
