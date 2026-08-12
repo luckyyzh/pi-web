@@ -7,6 +7,7 @@ import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
 import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
+import { openFileTab, saveFileViewerState } from "./file-tab-state";
 import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
 import { PluginsConfig } from "./PluginsConfig";
@@ -22,7 +23,11 @@ import { useAudio } from "@/hooks/useAudio";
 import { copyText } from "@/lib/clipboard";
 import { getFileName } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
-import { showCompletionNotification } from "@/lib/browser-notifications";
+import {
+  claimExtensionAttentionNotification,
+  shouldShowBrowserNotification,
+  showBrowserNotification,
+} from "@/lib/browser-notifications";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import { clearLastOpen, getLastOpenSession, setLastOpenSession } from "@/lib/workspace-memory";
 import {
@@ -36,10 +41,11 @@ import {
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
 } from "@/lib/panel-layout";
-import type { SessionInfo, SessionTreeNode } from "@/lib/types";
+import type { BlockingExtensionUiRequest, SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import type { FileViewerState } from "@/lib/file-viewer-state";
 
 type SessionCopyField = "file" | "id";
 type AutoNameStatus =
@@ -65,6 +71,7 @@ export function AppShell() {
   // also fire for tasks finishing in a non-active workspace whose ChatWindow
   // is not mounted. ChatWindow receives the audio callbacks as props.
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio, soundEnabledRef } = useAudio();
+  const notifiedAttentionRequestIdsRef = useRef(new Set<string>());
   const handleBackgroundTaskDone = useCallback(() => {
     if (soundEnabledRef.current) playDoneSound();
   }, [playDoneSound, soundEnabledRef]);
@@ -268,6 +275,14 @@ export function AppShell() {
   // Right panel — file tabs only
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
+
+  const handleFileViewerStateChange = useCallback((
+    tabId: string,
+    viewerRevision: number,
+    viewerState: FileViewerState,
+  ) => {
+    setFileTabs((prev) => saveFileViewerState(prev, tabId, viewerRevision, viewerState));
+  }, []);
 
   // Same @mention format as the chat input's @ autocomplete, so the agent's
   // read tool resolves it the same way (it strips the @ prefix).
@@ -509,12 +524,16 @@ export function AppShell() {
   // handleCwdChange relies on. Hydrate it from the session list so switching
   // worktrees right after creating a session doesn't close the chat.
   const hydrateSelectedSession = useCallback((sessionId: string) => {
-    void fetch("/api/sessions")
+    void fetch("/api/sessions", { cache: "no-store" })
       .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
       .then((d) => {
         const full = d?.sessions.find((s) => s.id === sessionId);
         if (!full) return;
-        setSelectedSession((prev) => (prev && prev.id === sessionId && !prev.projectRoot ? full : prev));
+        setSelectedSession((prev) => (
+          prev?.id === sessionId
+            ? { ...prev, ...full, transient: full.transient ?? false }
+            : prev
+        ));
       })
       .catch(() => {});
   }, []);
@@ -531,21 +550,26 @@ export function AppShell() {
     router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
   }, [invalidateWorkspaceRestore, router, hydrateSelectedSession]);
 
-  const handleAgentEnd = useCallback(() => {
-    setRefreshKey((k) => k + 1);
-    setExplorerRefreshKey((k) => k + 1);
-
-    if (document.visibilityState === "visible") return;
+  const deliverSessionNotification = useCallback(({
+    targetSession,
+    title,
+    body,
+    tag,
+  }: {
+    targetSession: SessionInfo | null;
+    title: string;
+    body: string;
+    tag?: string;
+  }) => {
     if (!("Notification" in window)) return;
 
-    const targetSession = selectedSession;
     const fire = () => {
-      const title = selectedSession?.name ?? translate("i18n.sessionComplete");
       const sessionUrl = targetSession ? `/?session=${encodeURIComponent(targetSession.id)}` : "/";
-      void showCompletionNotification({
+      void showBrowserNotification({
         title,
-        body: translate("i18n.taskFinished"),
+        body,
         sessionUrl,
+        tag,
         onClick: () => {
           window.focus();
           if (targetSession) handleSelectSession(targetSession);
@@ -558,7 +582,35 @@ export function AppShell() {
     } else if (Notification.permission === "default") {
       void Notification.requestPermission().then((p) => { if (p === "granted") fire(); });
     }
-  }, [handleSelectSession, selectedSession, translate]);
+  }, [handleSelectSession]);
+
+  const handleAgentEnd = useCallback(() => {
+    setRefreshKey((k) => k + 1);
+    setExplorerRefreshKey((k) => k + 1);
+    if (selectedSession) hydrateSelectedSession(selectedSession.id);
+
+    if (!shouldShowBrowserNotification()) return;
+    const targetSession = selectedSession;
+    deliverSessionNotification({
+      targetSession,
+      title: targetSession?.name ?? translate("i18n.sessionComplete"),
+      body: translate("i18n.taskFinished"),
+    });
+  }, [deliverSessionNotification, hydrateSelectedSession, selectedSession, translate]);
+
+  const handleAttentionNeeded = useCallback((request: BlockingExtensionUiRequest) => {
+    if (!shouldShowBrowserNotification()) return;
+    if (!claimExtensionAttentionNotification(request, notifiedAttentionRequestIdsRef.current)) return;
+
+    deliverSessionNotification({
+      targetSession: selectedSession,
+      title: translate("i18n.attentionNeeded"),
+      body: request.method === "custom"
+        ? translate("i18n.extensionInputNeeded")
+        : request.title,
+      tag: `pi-extension-ui:${request.id}`,
+    });
+  }, [deliverSessionNotification, selectedSession, translate]);
 
   const handleAutoName = useCallback(async () => {
     const sessionId = selectedSession?.id;
@@ -609,6 +661,7 @@ export function AppShell() {
     setSelectedSession((prev) => ({
       ...(prev ?? { path: "", cwd: "", created: "", modified: "", messageCount: 0, firstMessage: "" }),
       id: newSessionId,
+      transient: false,
     }));
     hydrateSelectedSession(newSessionId);
     router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
@@ -647,28 +700,13 @@ export function AppShell() {
     const sourceSessionId = options?.sourceSessionId;
     const modeHint = options?.modeHint;
     const tabId = `file:${filePath}`;
-    setFileTabs((prev) => {
-      const existing = prev.find((t) => t.id === tabId);
-      if (!existing) {
-        return [...prev, {
-          id: tabId,
-          label: fileName,
-          filePath,
-          sourceSessionId,
-          initialDisplayMode: modeHint,
-        }];
-      }
-      const sourceUnchanged = !sourceSessionId || existing.sourceSessionId === sourceSessionId;
-      const modeUnchanged = !modeHint || existing.initialDisplayMode === modeHint;
-      if (sourceUnchanged && modeUnchanged) return prev;
-      return prev.map((t) => {
-        if (t.id !== tabId) return t;
-        const next: Tab = { ...t };
-        if (sourceSessionId) next.sourceSessionId = sourceSessionId;
-        if (modeHint) next.initialDisplayMode = modeHint;
-        return next;
-      });
-    });
+    setFileTabs((prev) => openFileTab(prev, {
+      fileName,
+      filePath,
+      modeHint,
+      sourceSessionId,
+      tabId,
+    }));
     setActiveFileTabId(tabId);
     setRightPanelOpen(true);
     // On mobile the file panel is full-screen; close the drawer so it shows.
@@ -759,7 +797,7 @@ export function AppShell() {
     }
   }, [projectTrustBusy, projectTrustCwd]);
 
-  const activeFileTab = fileTabs.find((t) => t.id === activeFileTabId) ?? null;
+  const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
   const windowTitle = activeCwdName ? `${activeCwdName} - Pi Web` : "Pi Web";
 
@@ -1207,7 +1245,7 @@ export function AppShell() {
                   selectedSession
                   && ((sessionStats?.userMessages ?? 0) > 0 || selectedSession.messageCount > 0),
                 );
-                const disabled = !selectedSession || !hasMessages || autoNameStatus.kind === "naming";
+                const disabled = !selectedSession || selectedSession.transient || !hasMessages || autoNameStatus.kind === "naming";
                 const isSuccess = autoNameStatus.kind === "success";
                 const isError = autoNameStatus.kind === "error";
                 const label = autoNameStatus.kind === "naming"
@@ -1217,7 +1255,7 @@ export function AppShell() {
                     : isError
                       ? translate("title.failed")
                       : translate("title.generate");
-                const title = !selectedSession
+                const title = !selectedSession || selectedSession.transient
                    ? translate("title.unsaved")
                    : !hasMessages
                      ? translate("title.noMessages")
@@ -1678,6 +1716,7 @@ export function AppShell() {
               newSessionCwd={effectiveNewSessionCwd}
               newSessionDraftKey={newSessionDraftKey}
               onAgentEnd={handleAgentEnd}
+              onAttentionNeeded={handleAttentionNeeded}
               onSessionCreated={handleSessionCreated}
               onSessionForked={handleSessionForked}
               modelsRefreshKey={modelsRefreshKey}
@@ -1786,15 +1825,23 @@ export function AppShell() {
 
         </div>
 
-        {/* File content */}
+        {/* Only the active viewer is mounted. Lightweight per-tab state is restored on activation. */}
         <div style={{ flex: 1, overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
           {activeFileTab?.filePath ? (
             <FileViewer
+              key={`${activeFileTab.id}:${activeFileTab.viewerRevision ?? 0}`}
               filePath={activeFileTab.filePath}
               cwd={activeCwd ?? undefined}
               sourceSessionId={activeFileTab.sourceSessionId}
               gitRefreshKey={explorerRefreshKey}
               initialDisplayMode={activeFileTab.initialDisplayMode}
+              initialState={activeFileTab.viewerState}
+              watchEnabled={rightPanelOpen}
+              onStateChange={(viewerState) => handleFileViewerStateChange(
+                activeFileTab.id,
+                activeFileTab.viewerRevision ?? 0,
+                viewerState,
+              )}
               onMentionLines={rightPanelOpen ? handleFileLineMention : undefined}
               onAtMention={handleAtMention}
               onOpenFile={(filePath) => handleOpenFile(
