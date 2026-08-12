@@ -3,55 +3,19 @@ import fs from "fs";
 import { readFileSync } from "fs";
 import { join } from "path";
 
-// Diagnostic hook (disabled by default): set NEXT_FS_DIAG=1 to print the caller
-// stack whenever fs tries to read a Windows user-dir junction like
-// "Application Data". Helps locate who scans the user dir during `next build`
-// when it fails with EPERM on machines whose junctions are restricted.
-if (process.env.NEXT_FS_DIAG === "1") {
-  const HIT = /Application Data|Local Settings|Cookies|My Documents|NetHood|SendTo|Recent|Templates|Favorites|Desktop|Start Menu|AppData/i;
-  console.error(
-    "[FS-DIAG] env USERPROFILE=" + (process.env.USERPROFILE ?? "") +
-    " HOME=" + (process.env.HOME ?? "") +
-    " APPDATA=" + (process.env.APPDATA ?? "") +
-    " LOCALAPPDATA=" + (process.env.LOCALAPPDATA ?? "") +
-    " cwd=" + process.cwd(),
-  );
-  const origReaddir = fs.readdir.bind(fs);
-  const origReaddirSync = fs.readdirSync.bind(fs);
-  // @ts-ignore monkeypatch for diagnostics
-  fs.readdir = (p: any, ...a: any[]) => {
-    if (typeof p === "string" && HIT.test(p)) console.error("[FS-DIAG] readdir:", p, "\n" + new Error("stack").stack);
-    return (origReaddir as any).apply(fs, [p, ...a]);
-  };
-  // @ts-ignore monkeypatch for diagnostics
-  fs.readdirSync = (p: any, ...a: any[]) => {
-    if (typeof p === "string" && HIT.test(p)) console.error("[FS-DIAG] readdirSync:", p, "\n" + new Error("stack").stack);
-    return (origReaddirSync as any).apply(fs, [p, ...a]);
-  };
-  const origScandir = (fs as any).scandir?.bind(fs);
-  if (origScandir) {
-    // @ts-ignore monkeypatch for diagnostics
-    fs.scandir = (p: any, ...a: any[]) => {
-      if (typeof p === "string" && HIT.test(p)) console.error("[FS-DIAG] scandir:", p, "\n" + new Error("stack").stack);
-      return (origScandir as any).apply(fs, [p, ...a]);
-    };
-  }
-}
-
-// Guard (always on): never enumerate anything under the user profile dir.
-// When the project lives on a different drive than USERPROFILE (e.g. project
-// on D: while the profile is on C:), Next's nft tracer mis-classifies the user
-// dir as project-internal (Windows path.relative returns an absolute path
-// across drives) and globs it, hitting EPERM on legacy junction dirs
-// (Application Data, Cookies, Local Settings, PrintHood, My Documents, ...).
-// Those dirs never contain build inputs, so returning an empty listing is safe.
+// Guard (always on): never enumerate the user profile dir itself. When the
+// project lives on a different drive than USERPROFILE (e.g. project on D:
+// while the profile is on C:), Next's nft tracer mis-classifies the user dir
+// as project-internal (Windows path.relative returns an absolute path across
+// drives) and globs it, hitting EPERM on legacy junction dirs (Application
+// Data, Cookies, Local Settings, PrintHood, ...). Returning an empty listing
+// for the profile root stops the glob before it descends into those junctions.
+// Projects inside the profile dir are not affected (they aren't the root).
 const USER_PROFILE = (process.env.USERPROFILE || "").toLowerCase().replace(/\\/g, "/");
-const isUserDir = (p: unknown): p is string => {
-  if (typeof p !== "string") return false;
-  if (!USER_PROFILE) return false;
-  const norm = p.toLowerCase().replace(/\\/g, "/");
-  return norm === USER_PROFILE || norm.startsWith(USER_PROFILE + "/");
-};
+const isUserDir = (p: unknown): p is string =>
+  typeof p === "string" &&
+  !!USER_PROFILE &&
+  p.toLowerCase().replace(/\\/g, "/") === USER_PROFILE;
 const _guardReaddir = fs.readdir.bind(fs);
 // @ts-ignore monkeypatch for guard (support both callback and promise callers)
 fs.readdir = (p: unknown, ...args: any[]) => {
