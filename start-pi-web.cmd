@@ -85,6 +85,12 @@ if not exist ".next\BUILD_ID" (
     pause
     exit /b 1
   )
+  if not exist ".next\BUILD_ID" (
+    echo [ERROR] Build finished but .next\BUILD_ID is missing - the build worker
+    echo        probably crashed. Retry, or free memory / enlarge the page file.
+    pause
+    exit /b 1
+  )
   echo [OK] Build complete.
 ) else (
   echo [OK] Build artifacts present.

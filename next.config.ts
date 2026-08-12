@@ -84,6 +84,13 @@ try {
 } catch { /* package not found, use default */ }
 
 const nextConfig: NextConfig = {
+  // Limit build workers: on low-memory machines (small pagefile) the default
+  // per-CPU worker count makes Next's page-data workers crash with
+  // "OS can't spawn worker thread" (os error 1450/1455). Override with
+  // NEXT_BUILD_CPUS if needed.
+  experimental: {
+    cpus: process.env.NEXT_BUILD_CPUS ? Number(process.env.NEXT_BUILD_CPUS) : 2,
+  },
   outputFileTracingRoot: __dirname,
   serverExternalPackages: [
     "undici",
