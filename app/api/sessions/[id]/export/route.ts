@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import { execFile } from "child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { basename, dirname, join } from "path";
 import { promisify } from "util";
@@ -251,8 +251,7 @@ export async function GET(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    const tempDir = join(tmpdir(), "pi-web-export");
-    mkdirSync(tempDir, { recursive: true });
+    const tempDir = mkdtempSync(join(tmpdir(), "pi-web-export-"));
 
     const sessionBase = basename(filePath, ".jsonl");
     const fileName = `pi-session-${sessionBase}.html`;
