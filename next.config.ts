@@ -8,7 +8,14 @@ import { join } from "path";
 // "Application Data". Helps locate who scans the user dir during `next build`
 // when it fails with EPERM on machines whose junctions are restricted.
 if (process.env.NEXT_FS_DIAG === "1") {
-  const HIT = /Application Data/i;
+  const HIT = /Application Data|Local Settings|Cookies|My Documents|NetHood|SendTo|Recent|Templates|Favorites|Desktop|Start Menu|AppData/i;
+  console.error(
+    "[FS-DIAG] env USERPROFILE=" + (process.env.USERPROFILE ?? "") +
+    " HOME=" + (process.env.HOME ?? "") +
+    " APPDATA=" + (process.env.APPDATA ?? "") +
+    " LOCALAPPDATA=" + (process.env.LOCALAPPDATA ?? "") +
+    " cwd=" + process.cwd(),
+  );
   const origReaddir = fs.readdir.bind(fs);
   const origReaddirSync = fs.readdirSync.bind(fs);
   // @ts-ignore monkeypatch for diagnostics
