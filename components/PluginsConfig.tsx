@@ -235,56 +235,6 @@ function Toggle({
   );
 }
 
-function SegmentedScope({
-  value,
-  projectResourcesLoaded,
-  onChange,
-}: {
-  value: PluginScope;
-  projectResourcesLoaded: boolean;
-  onChange: (scope: PluginScope) => void;
-}) {
-  const { t } = useI18n();
-  return (
-    <div
-      style={{
-        display: "inline-flex",
-        border: "1px solid var(--border)",
-        borderRadius: 7,
-        overflow: "hidden",
-        height: 30,
-      }}
-    >
-      {(["global", "project"] as PluginScope[]).map((scope) => {
-        const active = value === scope;
-        const disabled = scope === "project" && !projectResourcesLoaded;
-        return (
-          <button
-            key={scope}
-            onClick={() => {
-              if (!disabled) onChange(scope);
-            }}
-            disabled={disabled}
-            title={disabled ? t("trust.projectScopeUnavailable") : undefined}
-            style={{
-              width: 76,
-              border: "none",
-              borderRight: scope === "global" ? "1px solid var(--border)" : "none",
-              background: active ? "var(--bg-selected)" : "none",
-              color: active ? "var(--text)" : "var(--text-muted)",
-              cursor: disabled ? "not-allowed" : "pointer",
-              opacity: disabled ? 0.45 : 1,
-              fontSize: 12,
-            }}
-          >
-            {scope}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
 
 function ScopeTag({ scope }: { scope: PluginScope }) {
   return (
@@ -1285,8 +1235,6 @@ export function PluginsConfig({
   }, [loadBundled, loadPlugins]);
 
   useEffect(() => {
-
-  useEffect(() => {
     setUpdateStatuses({});
     setUpdateError(null);
     void loadPlugins();
@@ -1364,6 +1312,7 @@ export function PluginsConfig({
     }
   }, [cwd, sessionId, t]);
 
+  useEffect(() => {
     void loadBundled();
   }, [loadBundled]);
 
