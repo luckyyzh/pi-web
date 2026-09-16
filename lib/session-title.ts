@@ -5,6 +5,7 @@ import {
   type AgentTool,
 } from "@earendil-works/pi-agent-core";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { withoutSessionFastMode } from "./session-fast-mode";
 
 const TITLE_TIMEOUT_MS = 90_000;
 const MAX_TITLE_LENGTH = 80;
@@ -57,7 +58,7 @@ export function buildSessionTitleAgentOptions(source: Agent): AgentOptions {
     transformContext: source.transformContext,
     streamFn: source.streamFunction,
     getApiKey: source.getApiKey,
-    onPayload: source.onPayload,
+    onPayload: withoutSessionFastMode(source.onPayload),
     onResponse: source.onResponse,
     steeringMode: source.steeringMode,
     followUpMode: source.followUpMode,

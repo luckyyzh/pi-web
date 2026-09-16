@@ -33,6 +33,7 @@ import {
   streamReducer,
   type ClientAssistantMessageEvent,
 } from "@/lib/streaming-message";
+import { supportsCodexFastMode } from "@/lib/session-fast-mode";
 
 export interface SessionData {
   sessionId: string;
@@ -41,6 +42,8 @@ export interface SessionData {
   tree: SessionTreeNode[];
   leafId: string | null;
   toolNames?: string[];
+  /** Session-scoped Codex Fast mode preference (default false). */
+  fastMode?: boolean;
   context: {
     messages: AgentMessage[];
     entryIds: string[];
@@ -72,6 +75,7 @@ type AgentStateResponse = {
   contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null;
   systemPrompt?: string;
   thinkingLevel?: string;
+  fastMode?: boolean;
   isStreaming?: boolean;
   isPromptRunning?: boolean;
   isBashRunning?: boolean;
@@ -305,6 +309,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
   const [toolPreset, setToolPreset] = useState<ToolPreset>("default");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
+  // Session-scoped Codex Fast mode. Defaults to false; only mirrored from the
+  // server, never persisted as a global default, and independent of thinking.
+  const [fastMode, setFastMode] = useState(false);
+  const [fastModeSwitching, setFastModeSwitching] = useState(false);
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
@@ -353,6 +361,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const newSessionPromotedRef = useRef(false);
   const newSessionModelOverrideRef = useRef<SelectedModel | null>(null);
   const thinkingLevelOverrideRef = useRef<Exclude<ThinkingLevelOption, "auto"> | null>(null);
+  // Fast mode selected before a new session exists; rides the ensure_session
+  // request and is confirmed by its response.
+  const fastModeOverrideRef = useRef<boolean | null>(null);
   const promptRunIdRef = useRef(0);
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
   const modelSwitchPendingRef = useRef(false);
@@ -405,12 +416,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const displayModel = isNew
     ? (newSessionModel ?? newSessionDefaultModel)
     : currentModel ?? (data?.context.messages.length === 0 ? newSessionDefaultModel : null);
+  // Support is decided solely by the displayed model (shared helper); the
+  // reasoning/thinking level never influences Fast availability.
+  const fastModeSupported = supportsCodexFastMode(displayModel);
   const composerDraftKey = session?.id ?? newSessionDraftKey ?? undefined;
 
   const syncLiveModel = useCallback((state?: AgentStateResponse) => {
     setLiveModel(state?.model
       ? { provider: state.model.provider, modelId: state.model.id }
       : null);
+  }, []);
+
+  const syncFastMode = useCallback((state?: AgentStateResponse) => {
+    if (state && state.fastMode !== undefined) setFastMode(Boolean(state.fastMode));
   }, []);
 
   const resolveComposerDraftKey = useCallback((key: string | undefined) => {
@@ -496,6 +514,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setHistoryCursor(d.context.oldestEntryId);
       setHasEarlierMessages(d.context.hasMore);
       setToolPresetState(d.toolNames !== undefined ? getPresetFromToolNames(d.toolNames) : "default");
+      if (d.fastMode !== undefined) setFastMode(Boolean(d.fastMode));
       setCurrentModelOverride((current) => modelSwitchPendingRef.current ? current : null);
       setError(null);
       if (d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
@@ -514,6 +533,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
         const liveState = agentState.state;
         syncLiveModel(liveState);
+        syncFastMode(liveState);
         if (liveState) {
           if (liveState.contextUsage !== undefined) setContextUsage(liveState.contextUsage ?? null);
           if (liveState.systemPrompt !== undefined) setSystemPrompt(liveState.systemPrompt ?? null);
@@ -535,7 +555,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [setToolPresetState, syncLiveModel]);
+  }, [setToolPresetState, syncFastMode, syncLiveModel]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null, before?: string | null, options?: { tail?: number; signal?: AbortSignal }) => {
     try {
@@ -626,6 +646,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // enabledModels scope atomically with AgentSession construction.
       const selectedModel = newSessionModelOverrideRef.current;
       const selectedThinkingLevel = thinkingLevelOverrideRef.current;
+      const selectedFastMode = fastModeOverrideRef.current;
       if (selectedModel) setPendingModel(selectedModel);
       const toolNames = getToolNamesForPreset(toolPreset);
       const res = await fetch("/api/agent/new", {
@@ -639,6 +660,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           ...(selectedThinkingLevel
             ? { thinkingLevel: selectedThinkingLevel }
             : {}),
+          ...(selectedFastMode ? { fastMode: selectedFastMode } : {}),
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -646,6 +668,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         sessionId: string;
         model?: SelectedModel | null;
         thinkingLevel?: ThinkingLevelOption;
+        fastMode?: boolean;
       };
       const realId = result.sessionId;
       sessionIdRef.current = realId;
@@ -659,6 +682,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       ) {
         setThinkingLevel(result.thinkingLevel);
       }
+      if (result.fastMode !== undefined) setFastMode(Boolean(result.fastMode));
       return realId;
     })();
 
@@ -683,8 +707,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     ]);
     if (!sessionHookMountedRef.current || sessionIdRef.current !== sid) return;
     syncLiveModel(state);
+    syncFastMode(state);
     setSystemPrompt(state.systemPrompt ?? "");
-  }, [ensureNewSession, loadTools, syncLiveModel]);
+  }, [ensureNewSession, loadTools, syncFastMode, syncLiveModel]);
 
   const loadSlashCommands = useCallback(async () => {
     const sid = sessionIdRef.current ?? await ensureNewSession();
@@ -927,6 +952,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
         const state = data.state;
         syncLiveModel(state);
+        syncFastMode(state);
         const promptActive = Boolean(data.running && state && (state.isStreaming || state.isPromptRunning));
         if (promptActive) {
           eventStreamGraceActiveRef.current = false;
@@ -960,7 +986,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
 
     eventStreamGraceTimerRef.current = setTimeout(() => void checkServerIdle(), EVENT_STREAM_IDLE_GRACE_MS);
-  }, [cancelEventStreamGrace, closeEvents, syncLiveModel]);
+  }, [cancelEventStreamGrace, closeEvents, syncFastMode, syncLiveModel]);
 
   const finishPromptWithoutStream = useCallback(async (sid: string | null = sessionIdRef.current, runId = promptRunIdRef.current) => {
     // Bail out before loadSession too: a stale finish for a previous run
@@ -997,6 +1023,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
           const state = data.state;
           syncLiveModel(state);
+          syncFastMode(state);
           if (!data.running || !state || (!state.isStreaming && !state.isPromptRunning)) {
             await finishPromptWithoutStream(sid, runId);
             return;
@@ -1007,7 +1034,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       await delay(PROMPT_SETTLE_POLL_MS);
     }
-  }, [finishPromptWithoutStream, syncLiveModel]);
+  }, [finishPromptWithoutStream, syncFastMode, syncLiveModel]);
 
   const waitForBashSettlement = useCallback(async (sid: string) => {
     const recoveryId = bashRecoveryIdRef.current + 1;
@@ -1024,6 +1051,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (!res.ok) continue;
         const data = await res.json() as { state?: AgentStateResponse };
         syncLiveModel(data.state);
+        syncFastMode(data.state);
         if (data.state?.isBashRunning) continue;
 
         await loadSession(sid);
@@ -1036,7 +1064,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // Keep polling while the page is mounted; network recovery is transparent.
       }
     }
-  }, [loadSession, syncLiveModel]);
+  }, [loadSession, syncFastMode, syncLiveModel]);
 
   // Reconcile client streaming state with the server. When SSE events are
   // missed (network drop, mobile tab backgrounded, half-open connection),
@@ -1056,6 +1084,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (sessionIdRef.current !== sid || promptRunIdRef.current !== runId) return;
       const state = data.state;
       syncLiveModel(state);
+      syncFastMode(state);
       // Mirror compaction state unconditionally: a missed compaction_end
       // would otherwise leave the "Stop compaction" UI stuck. No state
       // (wrapper destroyed) means nothing is compacting.
@@ -1079,7 +1108,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch {
       // Network still down — the next poll / visibility / online tick retries.
     }
-  }, [finishPromptWithoutStream, syncLiveModel]);
+  }, [finishPromptWithoutStream, syncFastMode, syncLiveModel]);
 
   // Recovery net for missed SSE events: while the agent is running, verify
   // against the server periodically and whenever the tab returns to the
@@ -1144,6 +1173,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             .then((r) => r.json())
             .then((d: { state?: AgentStateResponse }) => {
               syncLiveModel(d.state);
+              syncFastMode(d.state);
               if (d.state?.contextUsage !== undefined) setContextUsage(d.state.contextUsage ?? null);
               if (d.state?.systemPrompt !== undefined) setSystemPrompt(d.state.systemPrompt ?? null);
               if (d.state?.extensionStatuses !== undefined) setExtensionStatuses(d.state.extensionStatuses ?? []);
@@ -1363,7 +1393,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setExtensionDialog((current) => current?.id === event.id ? null : current);
         break;
     }
-  }, [addNotice, cancelEventStreamGrace, handleExtensionUiRequest, loadSession, notifyPromptStage, onAgentEnd, scheduleEventStreamClose, scrollToBottom, settleUiStage, syncLiveModel]);
+  }, [addNotice, cancelEventStreamGrace, handleExtensionUiRequest, loadSession, notifyPromptStage, onAgentEnd, scheduleEventStreamClose, scrollToBottom, settleUiStage, syncFastMode, syncLiveModel]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
@@ -1891,6 +1921,54 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isNew]);
 
+  const handleFastModeChange = useCallback(async (enabled: boolean) => {
+    if (agentRunningRef.current || bashRunningRef.current || fastModeSwitching || modelSwitching || isCompacting) return;
+    // Pre-creation selection: rides the ensure_session request as a
+    // session-scoped override — only while no ensure is in flight, since an
+    // in-flight ensure already captured the previous value. We deliberately
+    // do not create a session here (avoids duplicate sessions).
+    if (isNew && !sessionIdRef.current && !ensuringNewSessionRef.current) {
+      fastModeOverrideRef.current = enabled;
+      setFastMode(enabled);
+      return;
+    }
+    setFastModeSwitching(true);
+    try {
+      let sid: string | null = null;
+      try {
+        // Wait for the in-flight ensure to finish, then reconcile the real
+        // session with an explicit command instead of the stale value.
+        sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
+      } catch {
+        return; // ensure failed; nothing live to update
+      }
+      if (!sid || !sessionHookMountedRef.current || sessionIdRef.current !== sid) return;
+      // Session-scoped flag: the UI is only confirmed from the server's
+      // response, never optimistically.
+      const result = await sendAgentCommand<{ fastMode?: boolean }>(sid, {
+        type: "set_fast_mode",
+        enabled,
+      });
+      // A response without the flag is not a confirmed "off"; also re-verify
+      // the session before committing state after the await.
+      if (
+        result?.fastMode !== undefined
+        && sessionHookMountedRef.current
+        && sessionIdRef.current === sid
+      ) {
+        setFastMode(result.fastMode);
+      }
+    } catch (e) {
+      console.error("Failed to set fast mode:", e);
+      addNotice({
+        type: "error",
+        message: `Failed to toggle Fast mode: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    } finally {
+      setFastModeSwitching(false);
+    }
+  }, [addNotice, fastModeSwitching, isCompacting, isNew, modelSwitching]);
+
   const handleToolPresetChange = useCallback(async (preset: ToolPreset) => {
     const toolNames = getToolNamesForPreset(preset);
     setPreferredToolPreset(preset);
@@ -1918,11 +1996,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (sessionHookMountedRef.current && sessionIdRef.current === activeSessionId) {
         setSystemPrompt(state.systemPrompt ?? "");
         syncLiveModel(state);
+        syncFastMode(state);
       }
     } catch (e) {
       console.error("Failed to set tools:", e);
     }
-  }, [cancelEventStreamGrace, closeEvents, loadTools, maintainEventsConnected, setToolPresetState, syncLiveModel]);
+  }, [cancelEventStreamGrace, closeEvents, loadTools, maintainEventsConnected, setToolPresetState, syncFastMode, syncLiveModel]);
 
   const scrollToMessage = useCallback((element: HTMLElement, viewportOffset = 16) => {
     const container = scrollContainerRef.current;
@@ -2167,6 +2246,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // State
     data, loading, error, activeLeafId, messages, activeToolResults, entryIds, historyCursor, hasEarlierMessages, streamState,
     agentRunning, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
+    fastMode, fastModeSwitching, fastModeSupported,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, modelSwitching, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -2184,7 +2264,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleRecallQueue,
     handleBuiltinSlashCommand,
     setNoticePaused: setPausedNoticeId,
-    handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages, loadContext,
+    handleToolPresetChange, handleThinkingLevelChange, handleFastModeChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages, loadContext,
     scrollToBottom, scrollUserMsgToTop, scrollToMessage,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,

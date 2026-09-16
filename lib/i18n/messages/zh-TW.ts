@@ -397,6 +397,8 @@ export const zhTWLocale: LocalePlugin = {
     "chat.changeReasoning": "變更推理層級：{level}",
     "chat.changeReasoningLabel": "變更推理層級",
     "chat.changeToolPreset": "更改工具預設",
+    "chat.fastMode": "Fast",
+    "chat.fastModeHint": "Fast 請求更快的響應，不改變思考層級。這只是一個請求，不保證加速，且會額外消耗額度。",
     "chat.stopCompaction": "停止壓縮",
     "chat.compactContext": "壓縮上下文",
     "chat.compacting": "正在壓縮…",

@@ -44,6 +44,14 @@ import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
 import {
+  appendSessionFastMode,
+  copySessionFastMode,
+  readSessionFastMode,
+  supportsCodexFastMode,
+  validateFastMode,
+  withSessionFastMode,
+} from "./session-fast-mode";
+import {
   appendSessionToolSelection,
   readSessionToolSelection,
   validateSessionToolSelection,
@@ -112,6 +120,7 @@ type ExtensionCommandContextActionsLike = {
 };
 
 type AgentSessionWrapperOptions = {
+  fastMode?: boolean;
   exactSystemPrompt?: () => string;
   chatOnly?: boolean;
   onAgentRunComplete?: AgentRunCompleteListener;
@@ -164,6 +173,7 @@ export interface RpcSessionStartOptions {
   initialModel?: { provider: string; modelId: string };
   allowInitialModelFallback?: boolean;
   thinkingLevel?: ThinkingLevel;
+  fastMode?: boolean;
 }
 
 const CODING_TOOL_NAMES = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
@@ -237,6 +247,7 @@ export class AgentSessionWrapper {
   private extensionBindingError: unknown = null;
   private readonly exactSystemPrompt?: () => string;
   private readonly chatOnly: boolean;
+  private fastMode: boolean;
   private readonly onAgentRunComplete?: AgentRunCompleteListener;
   private readonly suppressCompletionNotifications: boolean;
   private unsubscribe: (() => void) | null = null;
@@ -253,6 +264,10 @@ export class AgentSessionWrapper {
   ) {
     this.exactSystemPrompt = options.exactSystemPrompt;
     this.chatOnly = options.chatOnly ?? false;
+    this.fastMode = options.fastMode ?? false;
+    if (this.inner.agent) {
+      this.inner.agent.onPayload = withSessionFastMode(this.inner.agent.onPayload, () => this.fastMode);
+    }
     this.onAgentRunComplete = options.onAgentRunComplete;
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
     this.installExactSystemPromptContinuation();
@@ -289,6 +304,10 @@ export class AgentSessionWrapper {
 
   isChatOnly(): boolean {
     return this.chatOnly;
+  }
+
+  getFastMode(): boolean {
+    return this.fastMode;
   }
 
   hasSuppressedCompletionNotifications(): boolean {
@@ -707,6 +726,7 @@ export class AgentSessionWrapper {
             : null,
           systemPrompt: this.inner.agent.state?.systemPrompt ?? "",
           thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
+          fastMode: this.fastMode,
           extensionStatuses: this.getExtensionStatuses(),
           extensionWidgets: this.getExtensionWidgets(),
         };
@@ -759,6 +779,7 @@ export class AgentSessionWrapper {
             newSessionFile = forkedPath;
           }
 
+          copySessionFastMode(sessionManager, forkedManager);
           if (!existsSync(newSessionFile)) {
             const header = forkedManager.getHeader();
             if (!header) throw new Error("Forked session is missing a session header");
@@ -792,7 +813,9 @@ export class AgentSessionWrapper {
         const forkedPath = sourceManager.createBranchedSession(entryId);
         if (!forkedPath) throw new Error("Failed to create forked session");
 
-        const newSessionId = SessionManager.open(forkedPath, sessionDir).getSessionId();
+        const forkedManager = SessionManager.open(forkedPath, sessionDir);
+        copySessionFastMode(sessionManager, forkedManager);
+        const newSessionId = forkedManager.getSessionId();
         cacheSessionPath(newSessionId, forkedPath);
         invalidateSessionListCache();
         return { cancelled: false, newSessionId };
@@ -818,7 +841,9 @@ export class AgentSessionWrapper {
           const clonedPath = sourceManager.createBranchedSession(leafId);
           if (!clonedPath || !existsSync(clonedPath)) throw new Error("Failed to clone current session branch");
 
-          const newSessionId = SessionManager.open(clonedPath, sessionDir).getSessionId();
+          const clonedManager = SessionManager.open(clonedPath, sessionDir);
+          copySessionFastMode(sessionManager, clonedManager);
+          const newSessionId = clonedManager.getSessionId();
           cacheSessionPath(newSessionId, clonedPath);
           invalidateSessionListCache();
           await this.shutdownAfterSessionReplacement("clone");
@@ -832,6 +857,18 @@ export class AgentSessionWrapper {
         }
         const result = await this.inner.navigateTree(command.targetId as string, {});
         return { cancelled: result.cancelled };
+      }
+
+      case "set_fast_mode": {
+        const enabled = validateFastMode(command.enabled);
+        if (this.isRunning()) throw new Error("Cannot change Fast mode while the session is running");
+        if (enabled && !supportsCodexFastMode(this.inner.model)) {
+          throw new Error("Fast mode requires a supported official OpenAI Codex model");
+        }
+        appendSessionFastMode(this.inner.sessionManager, enabled);
+        this.fastMode = enabled;
+        invalidateSessionListCache();
+        return { fastMode: this.fastMode };
       }
 
       case "set_thinking_level": {
@@ -1808,6 +1845,7 @@ export async function setRpcSessionTools(
   const sessionCwd = existing.cwd;
   const model = existing.inner.model;
   const currentThinkingLevel = existing.inner.agent.state?.thinkingLevel;
+  const fastMode = existing.getFastMode();
   await existing.shutdown();
 
   if (persistedFile) {
@@ -1819,6 +1857,7 @@ export async function setRpcSessionTools(
     toolNames,
     ...(model ? { initialModel: { provider: model.provider, modelId: model.id } } : {}),
     allowInitialModelFallback: true,
+    fastMode,
     ...(currentThinkingLevel && THINKING_LEVEL_NAMES.has(currentThinkingLevel as ThinkingLevel)
       ? { thinkingLevel: currentThinkingLevel as ThinkingLevel }
       : {}),
@@ -1953,6 +1992,7 @@ export async function startRpcSession(
   options: RpcSessionStartOptions = {},
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const { initialModel, allowInitialModelFallback, thinkingLevel } = options;
+  const requestedFastMode = options.fastMode === undefined ? undefined : validateFastMode(options.fastMode);
   const requestedToolNames = options.toolNames === undefined
     ? undefined
     : validateSessionToolSelection(options.toolNames);
@@ -1973,6 +2013,11 @@ export async function startRpcSession(
     sessionManager = SessionManager.create(cwd, undefined);
   }
   const sessionCwd = sessionManager.getCwd();
+  const persistedFastMode = readSessionFastMode(sessionManager.getEntries() as unknown as SessionEntry[]);
+  const fastMode = persistedFastMode ?? requestedFastMode ?? false;
+  if (persistedFastMode === undefined && requestedFastMode !== undefined) {
+    appendSessionFastMode(sessionManager, requestedFastMode);
+  }
   const subagentResources = sessionFile
     ? readSubagentSessionResources(
         sessionManager.getEntries() as unknown as SessionEntry[],
@@ -2137,6 +2182,7 @@ export async function startRpcSession(
           : () => contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles)
         : undefined;
     const wrapper = new AgentSessionWrapper(inner, {
+      fastMode,
       exactSystemPrompt,
       chatOnly,
       onAgentRunComplete: (completedSessionId) => {

@@ -405,6 +405,8 @@ export const enLocale: LocalePlugin = {
     "chat.changeReasoning": "Change reasoning level: {level}",
     "chat.changeReasoningLabel": "Change reasoning level",
     "chat.changeToolPreset": "Change tool preset",
+    "chat.fastMode": "Fast",
+    "chat.fastModeHint": "Fast requests faster responses without changing the thinking level. It is a request, not a speed guarantee, and consumes extra quota.",
     "chat.stopCompaction": "Stop compaction",
     "chat.compactContext": "Compact context",
     "chat.compacting": "Compacting…",

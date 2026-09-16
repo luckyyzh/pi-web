@@ -55,6 +55,11 @@ interface Props {
   modelScopeWarnings?: string[];
   onModelChange?: (provider: string, modelId: string) => void;
   modelSwitching?: boolean;
+  /** Session-scoped Codex Fast mode (only rendered for supported models). */
+  fastMode?: boolean;
+  fastModeSupported?: boolean;
+  fastModeSwitching?: boolean;
+  onFastModeChange?: (enabled: boolean) => void;
   onCompact?: () => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
@@ -544,6 +549,7 @@ export function ModelScopeWarningBanner({ warnings }: { warnings?: string[] }) {
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelScopeWarnings, onModelChange, modelSwitching,
+  fastMode, fastModeSupported, fastModeSwitching, onFastModeChange,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
@@ -1532,6 +1538,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   })();
   const rawToolPresetLabel = Object.entries(TOOL_PRESET_MAP).find(([, v]) => v === (toolPreset ?? "default"))?.[0] ?? "default";
   const toolPresetLabel = rawToolPresetLabel === "chat-only" ? t("chat.chatOnly") : rawToolPresetLabel;
+  // Fast mode is locked by any session busy state, not just streaming.
+  const fastModeLocked = isStreaming || fastModeSwitching || modelSwitching || isCompacting;
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -2299,6 +2307,39 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 busy={modelSwitching}
                 isAutoSelection={isAutoModelSelection}
               />
+            )}
+            {/* Fast toggle - hidden when the current model lacks Codex Fast support */}
+            {fastModeSupported && onFastModeChange && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (fastModeLocked) return;
+                  onFastModeChange(!fastMode);
+                }}
+                disabled={fastModeLocked}
+                aria-pressed={fastMode === true}
+                title={t("chat.fastModeHint")}
+                aria-label={t("chat.fastMode")}
+                style={{
+                  flexShrink: 0,
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
+                  height: 32,
+                  padding: "0 10px",
+                  background: fastMode ? "color-mix(in srgb, var(--accent) 14%, transparent)" : "none",
+                  border: `1px solid ${fastMode ? "color-mix(in srgb, var(--accent) 45%, transparent)" : "transparent"}`,
+                  borderRadius: 9,
+                  color: fastMode ? "var(--accent)" : "var(--text-muted)",
+                  cursor: fastModeLocked ? "not-allowed" : "pointer",
+                  fontSize: 12,
+                  fontWeight: 600,
+                  opacity: fastModeLocked ? 0.55 : 1,
+                  whiteSpace: "nowrap",
+                  transition: "background 0.12s, color 0.12s, border-color 0.12s, opacity 0.12s",
+                }}
+              >
+                <span aria-hidden="true">⚡</span>
+                <span>{t("chat.fastMode")}</span>
+              </button>
             )}
           </div>
 

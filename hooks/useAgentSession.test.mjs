@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const source = await readFile(new URL("./useAgentSession.ts", import.meta.url), "utf8");
-const chatWindowSource = await readFile(new URL("../components/ChatWindow.tsx", import.meta.url), "utf8");
-const chatInputSource = await readFile(new URL("../components/ChatInput.tsx", import.meta.url), "utf8");
-const appShellSource = await readFile(new URL("../components/AppShell.tsx", import.meta.url), "utf8");
+// Source-boundary assertions must work with Git's Windows CRLF checkouts too.
+async function readSource(path) {
+  return (await readFile(new URL(path, import.meta.url), "utf8")).replace(/\r\n/g, "\n");
+}
+const source = await readSource("./useAgentSession.ts");
+const chatWindowSource = await readSource("../components/ChatWindow.tsx");
+const chatInputSource = await readSource("../components/ChatInput.tsx");
+const appShellSource = await readSource("../components/AppShell.tsx");
 
 test("keeps the session event stream open through the idle grace window", () => {
   const finishSource = source.slice(

@@ -9,6 +9,7 @@ import type {
 import type {
   AgentLoopTurnUpdate,
   AgentMessage as PiAgentMessage,
+  AgentOptions,
   PrepareNextTurnContext,
 } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
@@ -142,6 +143,7 @@ export interface AgentSessionLike {
   readonly sessionManager: SessionManager;
   readonly settingsManager: SettingsManager;
   readonly agent: {
+    onPayload?: AgentOptions["onPayload"];
     state?: {
       systemPrompt?: string;
       thinkingLevel?: string;

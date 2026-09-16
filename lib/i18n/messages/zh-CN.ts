@@ -405,6 +405,8 @@ export const zhCNLocale: LocalePlugin = {
     "chat.changeReasoning": "更改推理级别：{level}",
     "chat.changeReasoningLabel": "更改推理级别",
     "chat.changeToolPreset": "更改工具预设",
+    "chat.fastMode": "Fast",
+    "chat.fastModeHint": "Fast 请求更快的响应，不改变思考等级。这只是一个请求，不保证加速，且会额外消耗额度。",
     "chat.stopCompaction": "停止压缩",
     "chat.compactContext": "压缩上下文",
     "chat.compacting": "正在压缩…",
