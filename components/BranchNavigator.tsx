@@ -20,24 +20,28 @@ interface Props {
   hasSession?: boolean;
   /** When inline, render icon-only (no text label) to save horizontal space */
   compact?: boolean;
+  /** Keep the inline dropdown mounted while another control supplies its trigger */
+  hideInlineButton?: boolean;
 }
 
 // Find the visible entry IDs on the path from root to activeLeafId.
-function buildActivePath(nodes: SessionTreeNode[], targetId: string | null): Set<string> {
+// Iterative DFS: a linear session degrades into a chain whose depth equals the
+// entry count, so a recursive search overflows the call stack. Walk with an
+// explicit stack instead (paths accumulate depth, not the call stack).
+export function buildActivePath(nodes: SessionTreeNode[], targetId: string | null): Set<string> {
   if (!targetId) return new Set();
   const target = targetId;
-  function search(nodes: SessionTreeNode[], path: string[]): string[] | null {
-    for (const node of nodes) {
-      const next = [...path, node.entry.id];
-      if (node.entry.id === target || node.compressedEntryIds?.includes(target)) {
-        return next;
-      }
-      const found = search(node.children, next);
-      if (found) return found;
+  const stack: { node: SessionTreeNode; path: string[] }[] = nodes.map((n) => ({ node: n, path: [n.entry.id] }));
+  while (stack.length > 0) {
+    const { node, path } = stack.pop()!;
+    if (node.entry.id === target || node.compressedEntryIds?.includes(target)) {
+      return new Set(path);
     }
-    return null;
+    for (const child of node.children) {
+      stack.push({ node: child, path: [...path, child.entry.id] });
+    }
   }
-  return new Set(search(nodes, []) ?? []);
+  return new Set();
 }
 
 function isMessageEntry(entry: SessionEntry): boolean {
@@ -97,12 +101,16 @@ function getLabel(entry: SessionEntry): string {
   return entry.type;
 }
 
-// Does the tree have any branching at all?
-function hasBranch(nodes: SessionTreeNode[]): boolean {
+// Does the tree have any branching at all? Iterative: a linear chain has no
+// branching but recursing over it would overflow the stack, so walk with a stack.
+export function hasSessionBranches(nodes: SessionTreeNode[]): boolean {
+  // Sessions branched from the very first message have multiple root nodes.
   if (nodes.length > 1) return true;
-  for (const node of nodes) {
+  const stack: SessionTreeNode[] = [...nodes];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
     if (node.children.length > 1) return true;
-    if (hasBranch(node.children)) return true;
+    for (const child of node.children) stack.push(child);
   }
   return false;
 }
@@ -245,7 +253,7 @@ function TreeNodeView({ node, activePathIds, depth, isLast, parentLines, onSelec
   );
 }
 
-export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, containerRef, open: openProp, onToggle, hasSession, compact }: Props) {
+export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, containerRef, open: openProp, onToggle, hasSession, compact, hideInlineButton }: Props) {
   const { t } = useI18n();
   const [openInternal, setOpenInternal] = useState(false);
   const open = openProp !== undefined ? openProp : openInternal;
@@ -277,7 +285,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
 
   const noBranchReason = !hasSession
     ? t("i18n.noActiveSession")
-    : !hasBranch(tree)
+    : !hasSessionBranches(tree)
       ? t("i18n.noBranches")
       : null;
 
@@ -307,7 +315,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
           ref={btnRef}
           onClick={() => onToggle ? onToggle() : setOpenInternal((v) => !v)}
           style={{
-            display: "flex",
+            display: hideInlineButton ? "none" : "flex",
             alignItems: "center",
             gap: 6,
             height: "100%",

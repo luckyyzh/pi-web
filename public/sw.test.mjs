@@ -26,6 +26,61 @@ function dispatchNotificationClick(data) {
   return { pending, wasClosed: () => closed };
 }
 
+function dispatchPush(payload, clients) {
+  let pending;
+  const shown = [];
+  self.clients = {
+    matchAll: async () => clients,
+    openWindow: async () => assert.fail("push must not open windows"),
+  };
+  self.registration = {
+    showNotification: async (title, options) => { shown.push({ title, options }); },
+  };
+  listeners.get("push")({
+    data: { json: () => payload },
+    waitUntil: (promise) => { pending = promise; },
+  });
+  return { pending, shown };
+}
+
+test("push always shows a notification, even when a window is visible", async () => {
+  const event = dispatchPush(
+    {
+      title: "Session complete",
+      body: "Task finished.",
+      url: "/?session=session-1",
+      tag: "pi-session-complete:session-1",
+    },
+    [
+      { url: "https://pi.test/?session=other", visibilityState: "hidden" },
+      { url: "https://pi.test/?session=session-1", visibilityState: "visible" },
+    ],
+  );
+  await event.pending;
+
+  // iOS revokes the push subscription when a push is handled without a
+  // notification, so the notification must never be suppressed.
+  assert.deepEqual(event.shown, [{
+    title: "Session complete",
+    options: {
+      body: "Task finished.",
+      data: { url: "/?session=session-1" },
+      tag: "pi-session-complete:session-1",
+      renotify: true,
+    },
+  }]);
+});
+
+test("push ignores malformed payloads", async () => {
+  const event = dispatchPush(
+    { title: "", body: 42 },
+    [],
+  );
+  await event.pending;
+
+  assert.deepEqual(event.shown, []);
+});
+
 test("notification click focuses an existing client at the session URL", async () => {
   const calls = [];
   const focusedClient = {

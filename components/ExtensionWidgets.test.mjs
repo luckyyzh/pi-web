@@ -1,77 +1,178 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import React from "react";
-import { renderToStaticMarkup } from "react-dom/server";
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
+const React = await jiti.import("react");
+const { renderToStaticMarkup } = await jiti.import("react-dom/server");
 const {
+  DEFAULT_EXPANDED_WIDGET_LINES,
   ExtensionWidgets,
-  MAX_EXTENSION_WIDGET_LINES,
+  formatExtensionWidgetContent,
+  getNextExpandedWidgetKey,
+  getUpdatedExtensionWidgetKeys,
+  snapshotExtensionWidgetContents,
 } = await jiti.import("./ExtensionWidgets.tsx");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
+
+function renderWidgets(props) {
+  return renderToStaticMarkup(
+    React.createElement(
+      I18nProvider,
+      null,
+      React.createElement(ExtensionWidgets, props),
+    ),
+  );
+}
 
 test("renders short extension widgets without a truncation marker", () => {
-  const html = renderToStaticMarkup(
-    React.createElement(ExtensionWidgets, {
-      widgets: [{ key: "short", lines: ["first", "second"] }],
-    }),
-  );
+  const html = renderWidgets({
+    widgets: [{ key: "short", lines: ["first", "second"], placement: "aboveEditor" }],
+  });
 
   assert.match(html, /first\nsecond/);
   assert.doesNotMatch(html, /widget truncated/);
+  assert.match(html, /aria-expanded="true"/);
+  assert.match(html, /data-direction="up"/);
+  assert.doesNotMatch(html, /[\u2191\u2193]/);
 });
 
-test("matches the Pi TUI extension widget line limit", () => {
+test("collapses long widgets by default", () => {
   const lines = Array.from(
-    { length: MAX_EXTENSION_WIDGET_LINES + 2 },
+    { length: 12 },
     (_, index) => `line-${index + 1}`,
   );
-  const html = renderToStaticMarkup(
-    React.createElement(ExtensionWidgets, {
-      widgets: [{ key: "long", lines }],
-    }),
-  );
+  const html = renderWidgets({
+    widgets: [{ key: "long", lines, placement: "belowEditor" }],
+  });
 
-  assert.match(html, new RegExp(`line-${MAX_EXTENSION_WIDGET_LINES}`));
-  assert.doesNotMatch(html, new RegExp(`line-${MAX_EXTENSION_WIDGET_LINES + 1}`));
-  assert.match(html, /\.\.\. \(widget truncated\)/);
+  assert.ok(lines.length > DEFAULT_EXPANDED_WIDGET_LINES);
+  assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /data-direction="down"/);
+  assert.doesNotMatch(html, /<pre/);
+  assert.doesNotMatch(html, /line-1/);
+  assert.doesNotMatch(html, /line-10/);
+  assert.doesNotMatch(html, /line-12/);
+});
+
+test("keeps all widget lines available for the scrollable expanded panel", () => {
+  const lines = Array.from(
+    { length: 12 },
+    (_, index) => `line-${index + 1}`,
+  );
+  const content = formatExtensionWidgetContent(lines);
+
+  assert.match(content, /line-10/);
+  assert.match(content, /line-12/);
+  assert.doesNotMatch(content, /widget truncated/);
+});
+
+test("keeps compact widgets expanded by default", () => {
+  const lines = Array.from(
+    { length: DEFAULT_EXPANDED_WIDGET_LINES },
+    (_, index) => `line-${index + 1}`,
+  );
+  const html = renderWidgets({
+    widgets: [{ key: "compact", lines, placement: "aboveEditor" }],
+  });
+
+  assert.match(html, /aria-expanded="true"/);
+  assert.match(html, /<pre/);
+});
+
+test("expands at most one compact widget", () => {
+  const html = renderWidgets({
+    widgets: [
+      { key: "first", lines: ["one", "two"], placement: "aboveEditor" },
+      { key: "second", lines: ["three", "four"], placement: "belowEditor" },
+    ],
+  });
+
+  assert.equal((html.match(/aria-expanded="true"/g) ?? []).length, 1);
+  assert.equal((html.match(/<section/g) ?? []).length, 1);
+  assert.match(html, /aria-labelledby="[^"]*trigger-0"/);
+  assert.doesNotMatch(html, /aria-labelledby="[^"]*trigger-1"/);
+});
+
+test("switching widgets closes the previously expanded widget", () => {
+  assert.equal(getNextExpandedWidgetKey(null, "first"), "first");
+  assert.equal(getNextExpandedWidgetKey("first", "second"), "second");
+  assert.equal(getNextExpandedWidgetKey("second", "second"), null);
+});
+
+test("detects only existing widgets whose line content changed", () => {
+  const previous = snapshotExtensionWidgetContents([
+    { key: "changed", lines: ["one"], placement: "aboveEditor" },
+    { key: "same", lines: ["ready"], placement: "belowEditor" },
+    { key: "removed", lines: ["gone"], placement: "belowEditor" },
+  ]);
+  const next = snapshotExtensionWidgetContents([
+    { key: "same", lines: ["ready"], placement: "aboveEditor" },
+    { key: "changed", lines: ["one", "two"], placement: "belowEditor" },
+    { key: "added", lines: ["new"], placement: "aboveEditor" },
+  ]);
+
+  assert.deepEqual(getUpdatedExtensionWidgetKeys(previous, next), ["changed"]);
+  assert.deepEqual(getUpdatedExtensionWidgetKeys(null, next), []);
+});
+
+test("compares widget lines without delimiter collisions", () => {
+  const previous = new Map([["status", ["one", "two"]]]);
+  const next = new Map([["status", ["one\ntwo"]]]);
+
+  assert.deepEqual(getUpdatedExtensionWidgetKeys(previous, next), ["status"]);
+});
+
+test("keeps one-line widgets compact but expandable", () => {
+  const html = renderWidgets({
+    widgets: [{ key: "single-line-widget", lines: ["ready"], placement: "belowEditor" }],
+  });
+
+  assert.match(html, /extension-widget-triggers/);
+  assert.match(html, /<svg[^>]*extension-widget-placement-icon/);
+  assert.match(html, /data-direction="down"/);
+  assert.doesNotMatch(html, /[\u2191\u2193]/);
+  assert.match(html, /Below editor widget/);
+  assert.match(html, /<button[^>]*class="extension-widget-trigger/);
+  assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /title="single-line-widget - Below editor widget - Expand"/);
+  assert.match(html, /extension-widget-key/);
+  assert.match(html, /extension-widget-update-pulse/);
+  assert.doesNotMatch(html, /extension-widget-preview/);
+  assert.doesNotMatch(html, /extension-widget-line-count/);
+  assert.doesNotMatch(html, />ready</);
+  assert.doesNotMatch(html, /<pre/);
 });
 
 test("hides widgets that render no lines", () => {
-  const html = renderToStaticMarkup(
-    React.createElement(ExtensionWidgets, {
-      widgets: [
-        { key: "pi-better-goal", lines: [] },
-        { key: "pi-better-plan", lines: [] },
-      ],
-    }),
-  );
+  const html = renderWidgets({
+    widgets: [
+      { key: "pi-better-goal", lines: [] },
+      { key: "pi-better-plan", lines: [] },
+    ],
+  });
 
   assert.equal(html, "");
 });
 
 test("hides widgets whose lines are blank only", () => {
-  const html = renderToStaticMarkup(
-    React.createElement(ExtensionWidgets, {
-      widgets: [{ key: "pi-better-goal", lines: ["", "   ", "\t"] }],
-    }),
-  );
+  const html = renderWidgets({
+    widgets: [{ key: "pi-better-goal", lines: ["", "   ", "\t"] }],
+  });
 
   assert.equal(html, "");
 });
 
 test("keeps non-empty widgets when an empty sibling is present", () => {
-  const html = renderToStaticMarkup(
-    React.createElement(ExtensionWidgets, {
-      widgets: [
-        { key: "pi-better-goal", lines: [] },
-        { key: "pi-better-plan", lines: ["Step 1 done", "Step 2 active"] },
-      ],
-    }),
-  );
+  const html = renderWidgets({
+    widgets: [
+      { key: "pi-better-goal", lines: [] },
+      { key: "pi-better-plan", lines: ["Step 1 done", "Step 2 active"] },
+    ],
+  });
 
   assert.doesNotMatch(html, /pi-better-goal/);
   assert.match(html, /pi-better-plan/);
@@ -79,11 +180,9 @@ test("keeps non-empty widgets when an empty sibling is present", () => {
 });
 
 test("still renders a widget that only looks blank on its trailing lines", () => {
-  const html = renderToStaticMarkup(
-    React.createElement(ExtensionWidgets, {
-      widgets: [{ key: "goal", lines: ["Goal: ship it", ""] }],
-    }),
-  );
+  const html = renderWidgets({
+    widgets: [{ key: "goal", lines: ["Goal: ship it", ""] }],
+  });
 
   assert.match(html, /Goal: ship it/);
 });
