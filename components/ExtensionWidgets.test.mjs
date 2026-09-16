@@ -39,3 +39,51 @@ test("matches the Pi TUI extension widget line limit", () => {
   assert.doesNotMatch(html, new RegExp(`line-${MAX_EXTENSION_WIDGET_LINES + 1}`));
   assert.match(html, /\.\.\. \(widget truncated\)/);
 });
+
+test("hides widgets that render no lines", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ExtensionWidgets, {
+      widgets: [
+        { key: "pi-better-goal", lines: [] },
+        { key: "pi-better-plan", lines: [] },
+      ],
+    }),
+  );
+
+  assert.equal(html, "");
+});
+
+test("hides widgets whose lines are blank only", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ExtensionWidgets, {
+      widgets: [{ key: "pi-better-goal", lines: ["", "   ", "\t"] }],
+    }),
+  );
+
+  assert.equal(html, "");
+});
+
+test("keeps non-empty widgets when an empty sibling is present", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ExtensionWidgets, {
+      widgets: [
+        { key: "pi-better-goal", lines: [] },
+        { key: "pi-better-plan", lines: ["Step 1 done", "Step 2 active"] },
+      ],
+    }),
+  );
+
+  assert.doesNotMatch(html, /pi-better-goal/);
+  assert.match(html, /pi-better-plan/);
+  assert.match(html, /Step 1 done/);
+});
+
+test("still renders a widget that only looks blank on its trailing lines", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ExtensionWidgets, {
+      widgets: [{ key: "goal", lines: ["Goal: ship it", ""] }],
+    }),
+  );
+
+  assert.match(html, /Goal: ship it/);
+});

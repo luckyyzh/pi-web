@@ -11,10 +11,17 @@ function getDisplayLines(lines: string[]): string[] {
 }
 
 export function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: string[] }> }) {
-  if (widgets.length === 0) return null;
+  // Extensions that register a widget before they have anything to show render an
+  // empty line array (pi-better-goal before a goal exists, pi-better-plan before a
+  // plan exists, or while its display mode is hidden). Drop those instead of
+  // drawing a header-only box with no body.
+  const visibleWidgets = widgets
+    .map((widget) => ({ key: widget.key, text: getDisplayLines(widget.lines).join("\n") }))
+    .filter((widget) => widget.text.trim() !== "");
+  if (visibleWidgets.length === 0) return null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
-      {widgets.map((widget) => (
+      {visibleWidgets.map((widget) => (
         <div
           key={widget.key}
           style={{
@@ -28,7 +35,7 @@ export function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; li
             {widget.key}
           </div>
           <pre style={{ margin: 0, padding: "8px 9px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--font-mono)" }}>
-            {getDisplayLines(widget.lines).join("\n")}
+            {widget.text}
           </pre>
         </div>
       ))}
