@@ -85,6 +85,7 @@ export const zhCNLocale: LocalePlugin = {
     "agents.enable": "启用子代理",
     "agents.disable": "停用子代理",
     "agents.builtinPath": "内置配置",
+    "agents.builtinEditHint": "修改将保存为所选范围内的同名覆盖配置，不会更改内置默认值。",
     "agents.inheritContext": "继承父会话上下文",
     "agents.background": "默认在后台运行",
     "agents.duplicate": "创建副本",

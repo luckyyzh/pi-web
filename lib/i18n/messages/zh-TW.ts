@@ -85,6 +85,7 @@ export const zhTWLocale: LocalePlugin = {
     "agents.enable": "啟用子代理",
     "agents.disable": "停用子代理",
     "agents.builtinPath": "內建設定檔",
+    "agents.builtinEditHint": "修改會儲存為所選範圍內的同名覆寫設定，不會更改內建預設值。",
     "agents.inheritContext": "繼承父工作階段上下文",
     "agents.background": "預設在背景執行",
     "agents.duplicate": "建立副本",

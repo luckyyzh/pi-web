@@ -37,16 +37,38 @@ test("marks profiles shadowed by a higher-precedence source", () => {
   assert.match(cssSource, /\.agents-overridden-label \{[\s\S]*?white-space: nowrap;/);
 });
 
-test("treats global and project profiles as directly editable", () => {
+test("treats built-in, global, and project profiles as directly editable", () => {
   assert.match(source, /scope === "global" \|\| scope === "project"/);
-  assert.match(source, /setMode\(isWritableScope\(profile\.scope\) \? "edit" : "view"\)/);
+  assert.match(source, /return scope === "builtin" \|\| isWritableScope\(scope\)/);
+  assert.match(source, /setMode\(isEditableScope\(chosen\.scope\) \? "edit" : "view"\)/);
+  assert.match(source, /setMode\(isEditableScope\(source\.scope\) \? "edit" : "view"\)/);
   assert.match(source, /selected && isWritableScope\(selected\.scope\) && mode === "edit"/);
 });
 
-test("offers both writable scopes when creating a profile", () => {
-  assert.match(source, /\{creating && \(/);
+test("offers both writable scopes for new profiles and same-name built-in overrides", () => {
+  assert.match(source, /const editingBuiltin = selected\?\.scope === "builtin" && mode === "edit"/);
+  assert.match(source, /const choosingSaveScope = creating \|\| editingBuiltin/);
+  assert.match(source, /\{choosingSaveScope && \(/);
   assert.match(source, /\["global", "project"\] as const/);
+  assert.match(source, /\{editingBuiltin && \([\s\S]*?t\("agents\.builtinEditHint"\)/);
+  assert.match(source, /const displayedScope = choosingSaveScope \? targetScope : selected\?\.scope/);
+  assert.match(source, /const displayedPath = choosingSaveScope/);
   assert.doesNotMatch(source, /beginOverride|mode === "override"|agents\.readOnly|agents\.override/);
+});
+
+test("reopens existing overrides and initializes drafts from the selected profile, not generic defaults", () => {
+  assert.match(source, /const chosen = requested \? getSubagentProfileEditorSource\(requested, next\) : null/);
+  assert.match(source, /const source = getSubagentProfileEditorSource\(profile, profiles\)/);
+  assert.match(source, /setDraft\(editableProfile\(source\)\)/);
+  assert.match(source, /setDraft\(editableProfile\(chosen\)\)/);
+  assert.match(source, /tools: \[\.\.\.profile\.tools\]/);
+  assert.match(source, /setTargetScope\(initialSaveScope\(chosen, next\)\)/);
+  assert.match(source, /setTargetScope\(initialSaveScope\(source, profiles\)\)/);
+  assert.match(source, /profile\.scope === "builtin" && isSubagentProfileOverridden\(profile, profiles\) \? "project" : "global"/);
+});
+
+test("stages built-in enabled changes until Save instead of patching a non-writable source", () => {
+  assert.match(source, /const toggleEnabled = async \(enabled: boolean\) => \{\s*if \(choosingSaveScope\) \{\s*update\("enabled", enabled\);\s*return;/);
 });
 
 test("uses the shared sidebar action for new profiles", () => {

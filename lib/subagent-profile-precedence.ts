@@ -7,6 +7,21 @@ const SUBAGENT_SCOPE_PRIORITY: Record<SubagentScope, number> = {
   project: 3,
 };
 
+/** Open an existing effective override instead of replacing it with built-in defaults. */
+export function getSubagentProfileEditorSource(
+  profile: SubagentProfile,
+  profiles: readonly SubagentProfile[],
+): SubagentProfile {
+  if (profile.scope !== "builtin") return profile;
+  const effective = profiles.reduce((current, candidate) =>
+    candidate.name.toLowerCase() === profile.name.toLowerCase()
+    && SUBAGENT_SCOPE_PRIORITY[candidate.scope] > SUBAGENT_SCOPE_PRIORITY[current.scope]
+      ? candidate
+      : current,
+  profile);
+  return effective.scope === "global" || effective.scope === "project" ? effective : profile;
+}
+
 export function isSubagentProfileOverridden(
   profile: Pick<SubagentProfile, "name" | "scope">,
   profiles: readonly Pick<SubagentProfile, "name" | "scope">[],

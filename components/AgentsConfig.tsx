@@ -6,7 +6,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SubagentProfilesResponse, SubagentSettingsResponse } from "@/lib/api-types";
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { ModelsData } from "@/lib/models-cache";
-import { isSubagentProfileOverridden } from "@/lib/subagent-profile-precedence";
+import { getSubagentProfileEditorSource, isSubagentProfileOverridden } from "@/lib/subagent-profile-precedence";
 import type { SubagentProfile, SubagentScope, SubagentWritableScope } from "@/lib/subagents";
 import {
   getLastSettingsSelection,
@@ -110,6 +110,16 @@ function isWritableScope(scope: SubagentScope): scope is SubagentWritableScope {
   return scope === "global" || scope === "project";
 }
 
+function isEditableScope(scope: SubagentScope): boolean {
+  return scope === "builtin" || isWritableScope(scope);
+}
+
+function initialSaveScope(profile: SubagentProfile, profiles: readonly SubagentProfile[]): SubagentWritableScope {
+  if (isWritableScope(profile.scope)) return profile.scope;
+  // A workspace override outranks global settings, so save above it in the project.
+  return profile.scope === "builtin" && isSubagentProfileOverridden(profile, profiles) ? "project" : "global";
+}
+
 function shortenPath(path: string): string {
   return path.replace(/^\/(?:Users|home)\/[^/]+/, "~");
 }
@@ -192,16 +202,17 @@ export function AgentsConfig({
       const next = data.profiles ?? [];
       setProfiles(next);
       const rememberedKey = preferredKey ?? getLastSettingsSelection("agents", cwd);
-      const chosen = next.find((profile) => profileKey(profile) === rememberedKey)
+      const requested = next.find((profile) => profileKey(profile) === rememberedKey)
         ?? next.find((profile) => profile.scope === "project")
         ?? next.find((profile) => profile.scope === "global")
         ?? next[0]
         ?? null;
+      const chosen = requested ? getSubagentProfileEditorSource(requested, next) : null;
       setSelectedKey(chosen ? profileKey(chosen) : null);
       if (chosen) {
         setDraft(editableProfile(chosen));
-        setMode(isWritableScope(chosen.scope) ? "edit" : "view");
-        if (isWritableScope(chosen.scope)) setTargetScope(chosen.scope);
+        setMode(isEditableScope(chosen.scope) ? "edit" : "view");
+        setTargetScope(initialSaveScope(chosen, next));
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -266,11 +277,13 @@ export function AgentsConfig({
   }, [cwd]);
 
   const selectProfile = (profile: SubagentProfile) => {
-    setSelectedKey(profileKey(profile));
-    setDraft(editableProfile(profile));
-    setMode(isWritableScope(profile.scope) ? "edit" : "view");
-    if (isWritableScope(profile.scope)) setTargetScope(profile.scope);
+    const source = getSubagentProfileEditorSource(profile, profiles);
+    setSelectedKey(profileKey(source));
+    setDraft(editableProfile(source));
+    setMode(isEditableScope(source.scope) ? "edit" : "view");
+    setTargetScope(initialSaveScope(source, profiles));
     setError(null);
+    setSavedOk(false);
   };
 
   const beginCreate = () => {
@@ -343,16 +356,18 @@ export function AgentsConfig({
 
   const editing = mode !== "view";
   const creating = mode === "create";
+  const editingBuiltin = selected?.scope === "builtin" && mode === "edit";
+  const choosingSaveScope = creating || editingBuiltin;
   const disabled = !editing || saving || toggling;
-  const displayedScope = creating ? targetScope : selected?.scope;
-  const displayedPath = creating
+  const displayedScope = choosingSaveScope ? targetScope : selected?.scope;
+  const displayedPath = choosingSaveScope
     ? targetScope === "global"
       ? `~/.pi/agent/agents/${draft.name || "..."}.md`
       : `./.pi/agents/${draft.name || "..."}.md`
     : selected
       ? displayProfilePath(selected, cwd) ?? t("agents.builtinPath")
       : "";
-  const fullPath = creating ? displayedPath : selected?.filePath ?? displayedPath;
+  const fullPath = choosingSaveScope ? displayedPath : selected?.filePath ?? displayedPath;
   const selectedModelAvailable = !draft.model || modelOptions.some((model) => `${model.provider}/${model.id}` === draft.model);
   const selectedModel = (() => {
     if (!draft.model) return null;
@@ -367,7 +382,7 @@ export function AgentsConfig({
   };
 
   const toggleEnabled = async (enabled: boolean) => {
-    if (creating) {
+    if (choosingSaveScope) {
       update("enabled", enabled);
       return;
     }
@@ -543,7 +558,13 @@ export function AgentsConfig({
                     </ConfigDetailActions>
                   </ConfigDetailHeader>
 
-                  {creating && (
+                  {editingBuiltin && (
+                    <span style={{ color: "var(--text-muted)", fontSize: 12 }}>
+                      {t("agents.builtinEditHint")}
+                    </span>
+                  )}
+
+                  {choosingSaveScope && (
                     <Field label={t("agents.saveScope")}>
                       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3, padding: 3, border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-panel)" }}>
                         {(["global", "project"] as const).map((scope) => (

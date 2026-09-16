@@ -85,6 +85,7 @@ export const enLocale: LocalePlugin = {
     "agents.enable": "Enable sub-agent",
     "agents.disable": "Disable sub-agent",
     "agents.builtinPath": "Built-in profile",
+    "agents.builtinEditHint": "Changes are saved as a same-name override in the selected scope. Built-in defaults remain unchanged.",
     "agents.inheritContext": "Inherit parent context",
     "agents.background": "Run in background by default",
     "agents.duplicate": "Duplicate",
