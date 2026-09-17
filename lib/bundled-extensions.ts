@@ -50,10 +50,10 @@ function sourceOf(entry: PackageSource): string {
 }
 
 /** 判断 settings 里某个包是否就是内置扩展 name（精确名、npm:name 或路径结尾） */
-function isExtensionPackage(source: string, name: string): boolean {
+export function isExtensionPackage(source: string, name: string): boolean {
   const s = source.trim();
   if (s === name) return true;
-  if (s === `npm:${name}`) return true;
+  if (s === `npm:${name}` || s.startsWith(`npm:${name}@`)) return true;
   return s.endsWith(`/${name}`) || s.endsWith(`\\${name}`);
 }
 
