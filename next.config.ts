@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 import fs from "fs";
 import { readFileSync } from "fs";
-import { dirname, join } from "path";
+import { dirname, join, parse } from "path";
 import { fileURLToPath } from "url";
 
 // Guard (always on): never enumerate the user profile dir itself. When the
@@ -16,7 +16,7 @@ const USER_PROFILE = (process.env.USERPROFILE || "").toLowerCase().replace(/\\/g
 const isUserDir = (p: unknown): p is string =>
   typeof p === "string" &&
   !!USER_PROFILE &&
-  p.toLowerCase().replace(/\\/g, "/") === USER_PROFILE;
+  p.toLowerCase().replace(/\\/g, "/").replace(/\/+$/, "") === USER_PROFILE;
 const _guardReaddir = fs.readdir.bind(fs);
 // @ts-ignore monkeypatch for guard (support both callback and promise callers)
 fs.readdir = (p: unknown, ...args: any[]) => {
@@ -34,6 +34,13 @@ const _guardReaddirSync = fs.readdirSync.bind(fs);
 // @ts-ignore monkeypatch for guard
 fs.readdirSync = (p: unknown, ...a: any[]) =>
   isUserDir(p) ? [] : (_guardReaddirSync as any)(p, ...a);
+// nft's async glob uses fs.promises.readdir, independently of fs.readdir.
+// Guard it too, otherwise cross-drive tracing walks AppData and can exhaust
+// the build worker's heap while collecting unrelated user files.
+const _guardReaddirAsync = fs.promises.readdir.bind(fs.promises);
+// @ts-ignore monkeypatch preserving the original overloads for other paths
+fs.promises.readdir = (p: unknown, ...a: any[]) =>
+  isUserDir(p) ? Promise.resolve([]) : (_guardReaddirAsync as any)(p, ...a);
 const _guardScandir = (fs as any).scandir?.bind(fs);
 if (_guardScandir) {
   // @ts-ignore monkeypatch for guard
@@ -41,8 +48,13 @@ if (_guardScandir) {
     isUserDir(p) ? (async function* () {})() : _guardScandir(p, ...a);
 }
 
-const { version } = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf8")) as { version: string };
 const configDir = dirname(fileURLToPath(import.meta.url));
+const crossDriveProfile = process.platform === "win32" && USER_PROFILE &&
+  parse(configDir).root.toLowerCase() !== parse(process.env.USERPROFILE || "").root.toLowerCase();
+const profileTraceIgnores = crossDriveProfile
+  ? [`${(process.env.USERPROFILE || "").replace(/\\/g, "/")}/**`]
+  : [];
+const { version } = JSON.parse(readFileSync(join(configDir, "package.json"), "utf8")) as { version: string };
 let piVersion = "unknown";
 try {
   const piPkgPath = join(configDir, "node_modules/@earendil-works/pi-coding-agent/package.json");
@@ -56,7 +68,21 @@ const nextConfig: NextConfig = {
   // NEXT_BUILD_CPUS if needed.
   experimental: {
     cpus: process.env.NEXT_BUILD_CPUS ? Number(process.env.NEXT_BUILD_CPUS) : 2,
+    webpackBuildWorker: true,
   },
+
+  // Next's webpack tracing runs before outputFileTracingExcludes is applied.
+  // Exclude the other-drive profile at that earlier stage as well, so dynamic
+  // runtime paths never turn AppData into build inputs (Next.js 16.3.1).
+  webpack(config) {
+    for (const plugin of config.plugins || []) {
+      if (plugin?.constructor?.name === "TraceEntryPointsPlugin") {
+        plugin.traceIgnores.push(...profileTraceIgnores);
+      }
+    }
+    return config;
+  },
+  outputFileTracingExcludes: { "/*": profileTraceIgnores },
 
   outputFileTracingRoot: configDir,
   serverExternalPackages: [
