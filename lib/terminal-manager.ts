@@ -1,7 +1,9 @@
 import { randomUUID } from "crypto";
 import { homedir } from "os";
 import type { IPty } from "node-pty";
+import { quoteShellArg, sshArguments } from "./remote-workspace";
 import { samePath } from "./paths";
+import { sameWorkspaceTarget, type WorkspaceTarget } from "./workspace-target";
 
 export type TerminalEvent =
   | { type: "output"; data: string; offset: number; reset?: boolean }
@@ -13,6 +15,7 @@ type TerminalListener = (event: TerminalEvent) => void;
 interface TerminalRecord {
   pty: IPty;
   cwd: string;
+  target: WorkspaceTarget;
   listeners: Set<TerminalListener>;
   backlog: string;
   offset: number;
@@ -59,6 +62,43 @@ function emit(record: TerminalRecord, event: TerminalEvent): void {
   for (const listener of record.listeners) listener(event);
 }
 
+function localShell(): string {
+  return process.platform === "win32"
+    ? process.env.ComSpec ?? "cmd.exe"
+    : process.env.SHELL || "/bin/sh";
+}
+
+function localShellArgs(): string[] {
+  return process.platform === "win32" ? [] : ["-l"];
+}
+
+// node-pty's Windows ConPTY spawn cannot resolve the bare name "ssh" (it
+// reports "File not found" synchronously); the .exe extension is required.
+// POSIX spawn resolves "ssh" through PATH as usual.
+function sshCommand(): string {
+  return process.platform === "win32" ? "ssh.exe" : "ssh";
+}
+
+/**
+ * Remote session bootstrap: safely cd into the workspace, then replace the
+ * session with a login shell. A missing directory must fail closed (non-zero
+ * exit, no interactive shell) and never fall back to another directory.
+ * `"${SHELL:-/bin/sh}"` is expanded by the *remote* shell, not here.
+ */
+function remoteShellCommand(remoteCwd: string): string {
+  return "cd " + quoteShellArg(remoteCwd) + ' && exec "${SHELL:-/bin/sh}" -l';
+}
+
+function ptyOptions(cwd: string, cols: number, rows: number) {
+  return {
+    name: "xterm-256color",
+    cols: dimension(cols, 80),
+    rows: dimension(rows, 24),
+    cwd: cwd || homedir(),
+    env: shellEnvironment(),
+  };
+}
+
 function scheduleCleanup(id: string, record: TerminalRecord): void {
   if (record.cleanupTimer || record.listeners.size || registry().get(id) !== record) return;
   record.cleanupTimer = setTimeout(() => killTerminal(id), TERMINAL_RECONNECT_MS);
@@ -69,10 +109,21 @@ function dimension(value: number, fallback: number): number {
   return Math.min(1000, Math.max(2, Number.isFinite(value) ? Math.floor(value) : fallback));
 }
 
-export function createTerminal(cwd: string, cols: number, rows: number, id: string = randomUUID()): string {
+export function createTerminal(
+  cwd: string,
+  cols: number,
+  rows: number,
+  id: string = randomUUID(),
+  target: WorkspaceTarget = { kind: "local", cwd },
+): string {
   const existing = registry().get(id);
   if (existing) {
-    if (!samePath(existing.cwd, cwd)) throw new Error("Terminal belongs to a different workspace");
+    // Local identity is the cwd (samePath: separator/case tolerant). Remote
+    // identity (id+host+cwd) stays an exact snapshot.
+    if (!samePath(existing.cwd, cwd) || existing.target.kind !== target.kind
+      || (target.kind === "ssh" && !sameWorkspaceTarget(existing.target, target))) {
+      throw new Error("Terminal belongs to a different workspace");
+    }
     return id;
   }
   let spawn: typeof import("node-pty").spawn;
@@ -90,20 +141,20 @@ export function createTerminal(cwd: string, cols: number, rows: number, id: stri
       { cause: error },
     );
   }
-  const shell = process.platform === "win32"
-    ? process.env.ComSpec ?? "cmd.exe"
-    : process.env.SHELL || "/bin/sh";
-  const args = process.platform === "win32" ? [] : ["-l"];
-  const pty = spawn(shell, args, {
-    name: "xterm-256color",
-    cols: dimension(cols, 80),
-    rows: dimension(rows, 24),
-    cwd: cwd || homedir(),
-    env: shellEnvironment(),
-  });
+  // Remote workspaces never spawn a local shell in a local directory. The
+  // compatibility path of a remote subdirectory usually does not exist
+  // locally, so the ssh client runs from the local home directory; the
+  // *remote* command does the cd and fails closed. TERM/-tt come from
+  // ptyOptions/sshArguments.
+  const options = ptyOptions(target.kind === "ssh" ? homedir() : cwd, cols, rows);
+  const pty = target.kind === "ssh"
+    ? spawn(sshCommand(), sshArguments(target.host, remoteShellCommand(target.cwd), true), options)
+    : spawn(localShell(), localShellArgs(), options);
   const record: TerminalRecord = {
     pty,
     cwd,
+    // Frozen copy: callers and API responses can never mutate the snapshot.
+    target: Object.freeze({ ...target }),
     listeners: new Set(),
     backlog: "",
     offset: 0,
@@ -137,6 +188,10 @@ export function hasTerminal(id: string): boolean {
 
 export function getTerminalCwd(id: string): string | undefined {
   return registry().get(id)?.cwd;
+}
+
+export function getTerminalTarget(id: string): WorkspaceTarget | undefined {
+  return registry().get(id)?.target;
 }
 
 export function subscribeTerminal(
@@ -187,11 +242,11 @@ export function killTerminal(id: string, force = false): boolean {
   if (record.cleanupTimer) clearTimeout(record.cleanupTimer);
   registry().delete(id);
   if (!record.exited) {
-    record.pty.kill(force ? "SIGKILL" : undefined);
+    record.pty.kill(force && process.platform !== "win32" ? "SIGKILL" : undefined);
     // A shell may trap SIGHUP; explicit close and lease expiry must still finish.
     if (!force) {
       record.cleanupTimer = setTimeout(() => {
-        if (!record.exited) record.pty.kill("SIGKILL");
+        if (!record.exited) record.pty.kill(process.platform === "win32" ? undefined : "SIGKILL");
       }, 2000);
       record.cleanupTimer.unref?.();
     }

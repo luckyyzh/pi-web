@@ -5,6 +5,7 @@ import { getAdditionalAllowedRoots, normalizeSlashes } from "./allowed-roots";
 import { isExistingPathWithinRoots, isPathWithinRoots } from "./path-security";
 import { listAllSessions } from "./session-reader";
 import { ensureShadowRoot, isRemoteModeActive, loadSshConfig } from "./ssh";
+import { listRemoteWorkspaceRoots } from "./remote-workspace";
 export { allowFileRoot, normalizeSlashes } from "./allowed-roots";
 export { isWindowsAbsolutePath } from "./paths";
 
@@ -44,6 +45,7 @@ export async function getAllowedFileRoots(): Promise<Set<string>> {
   }
 
   for (const root of getAdditionalAllowedRoots()) roots.add(root);
+  for (const root of listRemoteWorkspaceRoots()) roots.add(normalizeSlashes(root));
 
   // Remote SSH mode: the active shadow root must always be browsable, even
   // before any session has bound to it (the file explorer lists the shadow

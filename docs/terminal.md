@@ -5,6 +5,12 @@ in the right panel's existing tab bar. Each terminal tab keeps the cwd it was
 created with. Files still mount only their active viewer; terminal panels stay
 mounted behind inactive tabs, hidden panels, and session or project switches.
 
+SSH workspaces reuse this same terminal UI and transport. Their backend starts
+`ssh -tt` with a saved workspace target rather than starting a local shell in the
+compatibility cache directory. The header shows the SSH host and remote path;
+changing the selected connection does not move an existing terminal. See
+[Remote workspaces](remote-workspaces.md) for prerequisites and execution boundaries.
+
 ## Lifecycle
 
 - Each new tab generates a random terminal ID before creation. Creation with

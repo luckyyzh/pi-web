@@ -18,12 +18,11 @@ import {
   getVideoMime,
 } from "@/lib/file-types";
 import {
-  isRemoteModeActive,
-  loadSshConfig,
-  localToRemotePath,
   sshListDir,
   sshReadTextFile,
 } from "@/lib/ssh";
+import { resolveRemoteWorkspace, remotePathFor, localPathFor } from "@/lib/remote-workspace";
+import { resolveSessionPath, readSessionHeader } from "@/lib/session-reader";
 import { resolveDirentIsDirectory } from "@/lib/file-dirent";
 import { isFilePathReferencedBySession } from "@/lib/session-file-references";
 import { isApiRequestAllowed } from "@/lib/request-security";
@@ -88,6 +87,10 @@ async function getUploadDirectory(segments: string[]): Promise<
   const allowedRoots = await getAllowedFileRoots();
   if (!isFilePathAllowed(directory, allowedRoots)) {
     return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
+  }
+
+  if (resolveRemoteWorkspace(directory)) {
+    return { response: NextResponse.json({ error: "远程工作区暂不支持文件上传；不会写入本地缓存目录" }, { status: 400 }) };
   }
 
   let stat: fs.Stats;
@@ -429,13 +432,30 @@ export async function GET(
 ) {
   try {
     const { path: segments } = await params;
-    const filePath = filePathFromApiSegments(segments);
+    let filePath = filePathFromApiSegments(segments);
     const rawType = request.nextUrl.searchParams.get("type") ?? "list";
     const type = parseFileRequestType(rawType);
     if (!type) {
       return NextResponse.json({ error: "Invalid file request type" }, { status: 400 });
     }
     const sessionId = request.nextUrl.searchParams.get("sessionId");
+    // Agent messages use real remote absolute paths. Translate only using the source
+    // session's saved workspace, never the currently selected SSH connection.
+    if (sessionId && filePath.startsWith("/")) {
+      const sessionPath = await resolveSessionPath(sessionId);
+      const header = sessionPath ? readSessionHeader(sessionPath) : null;
+      const sourceWorkspace = header?.cwd ? resolveRemoteWorkspace(header.cwd) : null;
+      if (sourceWorkspace) {
+        const pathWorkspace = resolveRemoteWorkspace(filePath);
+        if (!pathWorkspace) {
+          const mapped = localPathFor(sourceWorkspace, filePath);
+          if (!mapped) return NextResponse.json({ error: "Remote file is outside the session workspace" }, { status: 403 });
+          filePath = mapped;
+        } else if (pathWorkspace.id !== sourceWorkspace.id) {
+          return NextResponse.json({ error: "File belongs to another remote workspace" }, { status: 403 });
+        }
+      }
+    }
 
     const allowedRoots = await getAllowedFileRoots();
     const allowedByRoot = isFilePathAllowed(filePath, allowedRoots);
@@ -447,15 +467,12 @@ export async function GET(
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
 
-    // ---- 远程模式：list / read（文本）走 SSH，其余暂不支持 ----
-    const sshCfg = loadSshConfig();
-    if (isRemoteModeActive(sshCfg)) {
-      const remotePath = localToRemotePath(filePath, sshCfg);
-      if (!remotePath) {
-        return NextResponse.json({ error: "Access denied" }, { status: 403 });
-      }
+    // Route by this workspace's saved target, including when another workspace is selected.
+    const workspace = resolveRemoteWorkspace(filePath);
+    if (workspace) {
+      const remotePath = remotePathFor(workspace, filePath);
       if (type === "list") {
-        const rawEntries = await sshListDir(sshCfg.host, remotePath);
+        const rawEntries = await sshListDir(workspace.host, remotePath);
         const entries = rawEntries
           .filter((d) => !IGNORED_NAMES.has(d.name) && !IGNORED_SUFFIXES.some((s) => d.name.endsWith(s)))
           .map((d) => ({ name: d.name, isDir: d.isDir, size: 0, modified: "" }))
@@ -466,7 +483,7 @@ export async function GET(
         return NextResponse.json({ entries, path: filePath, remote: remotePath });
       }
       if (type === "read") {
-        const { content, size } = await sshReadTextFile(sshCfg.host, remotePath);
+        const { content, size } = await sshReadTextFile(workspace.host, remotePath);
         if (size > TEXT_PREVIEW_MAX_BYTES) {
           return NextResponse.json({ error: "File too large for preview (>256KB)" }, { status: 413 });
         }

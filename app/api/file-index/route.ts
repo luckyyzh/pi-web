@@ -10,6 +10,8 @@ import {
   isWindowsAbsolutePath,
 } from "@/lib/file-access";
 import { buildEntriesFromFiles, filterFileEntries, type FileIndexEntry } from "@/lib/file-fuzzy";
+import { quoteShellArg, remotePathFor, resolveRemoteWorkspace, type RemoteWorkspace } from "@/lib/remote-workspace";
+import { sshExec } from "@/lib/ssh";
 
 const execFileAsync = promisify(execFile);
 
@@ -77,6 +79,14 @@ async function listWithGit(cwd: string): Promise<FileListing | null> {
   }
 }
 
+async function listWithRemote(workspace: RemoteWorkspace, cwd: string): Promise<FileListing> {
+  const excluded = [...IGNORED_NAMES].map((name) => `-name ${quoteShellArg(name)}`).join(" -o ");
+  const command = `cd ${quoteShellArg(remotePathFor(workspace, cwd))} && if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then git ls-files --cached --others --exclude-standard -z; else find . -maxdepth ${MAX_WALK_DEPTH + 1} \\( -type d \\( ${excluded} \\) -prune \\) -o \\( -type f ! -name '*.pyc' -printf '%P\\0' \\); fi`;
+  const stdout = await sshExec(workspace.host, command, 15_000);
+  const all = stdout.split("\0").filter(Boolean);
+  return { files: all.slice(0, GIT_HARD_CAP), hardTruncated: all.length > GIT_HARD_CAP };
+}
+
 function listWithWalk(cwd: string): FileListing {
   const files: string[] = [];
   // BFS so shallow files win when the cap truncates the listing.
@@ -127,24 +137,27 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
 
-    let stat: fs.Stats;
-    try {
-      stat = fs.statSync(cwd);
-    } catch {
-      return NextResponse.json({ error: "Directory not found" }, { status: 404 });
-    }
-    if (!stat.isDirectory()) {
-      return NextResponse.json({ error: "Not a directory" }, { status: 400 });
-    }
-    if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    const remote = resolveRemoteWorkspace(cwd);
+    if (!remote) {
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(cwd);
+      } catch {
+        return NextResponse.json({ error: "Directory not found" }, { status: 404 });
+      }
+      if (!stat.isDirectory()) {
+        return NextResponse.json({ error: "Not a directory" }, { status: 400 });
+      }
+      if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
+        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      }
     }
 
     const cache = getIndexCache();
     const now = Date.now();
     let cached = cache.get(cwd);
     if (!cached || cached.expiresAt <= now) {
-      const listing = (await listWithGit(cwd)) ?? listWithWalk(cwd);
+      const listing = remote ? await listWithRemote(remote, cwd) : (await listWithGit(cwd)) ?? listWithWalk(cwd);
       for (const [key, entry] of cache) {
         if (entry.expiresAt <= now) cache.delete(key);
       }

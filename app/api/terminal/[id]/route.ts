@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getTerminalCwd, killTerminal, resizeTerminal, writeTerminal } from "@/lib/terminal-manager";
+import { getTerminalCwd, getTerminalTarget, killTerminal, resizeTerminal, writeTerminal } from "@/lib/terminal-manager";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -7,8 +7,9 @@ export const runtime = "nodejs";
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const cwd = getTerminalCwd(id);
-  return cwd
-    ? NextResponse.json({ id, cwd })
+  const target = getTerminalTarget(id);
+  return cwd && target
+    ? NextResponse.json({ id, cwd, target })
     : NextResponse.json({ error: "Terminal expired or closed" }, { status: 404 });
 }
 

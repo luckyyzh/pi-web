@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme } from "@earendil-works/pi-coding-agent";
+import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, Theme } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
@@ -40,8 +40,14 @@ import {
   SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
 import { createSubagentController } from "./subagent-runtime";
+import { createSubagentProgressExtension } from "./subagent-progress-extension";
 import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
+import { resolveRemoteWorkspace } from "./remote-workspace";
+import { bindSessionWorkspace } from "./session-workspace";
+import { createWorkspaceSettings } from "./workspace-settings";
+import { remoteContextOverride } from "./remote-project-context";
+import { createRemoteAgentExtension, createRemoteBashOperations, preferRemoteWorkspaceExtension, remoteEnvironmentPrompt } from "./remote-agent";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
 import {
   appendSessionFastMode,
@@ -211,7 +217,10 @@ function withExtensionTools(session: AgentSessionLike, toolNames: string[]): str
   if (toolNames.length === 0) return [];
 
   const codingToolNames = new Set(CODING_TOOL_NAMES);
-  const selectedToolNames = resolveShellTools(toolNames, session.settingsManager.getDefaultTools());
+  const remote = resolveRemoteWorkspace(session.sessionManager.getCwd());
+  const selectedToolNames = remote
+    ? resolveShellTools(toolNames, ["bash"], "linux")
+    : resolveShellTools(toolNames, session.settingsManager.getDefaultTools());
   const extensionToolNames = session
     .getAllTools()
     .map((t) => t.name)
@@ -1023,14 +1032,17 @@ export class AgentSessionWrapper {
         if (this.pendingPromptCount > 0 || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning) {
           throw new Error("Cannot run a shell command while the session is busy");
         }
+        const remote = resolveRemoteWorkspace(this.cwd);
         const execution = this.inner.executeBash(
           command.command as string,
           undefined,
           {
             excludeFromContext: command.excludeFromContext as boolean | undefined,
-            operations: createProjectCommandBashOperations({
-              shellPath: this.inner.settingsManager.getShellPath(),
-            }),
+            operations: remote
+              ? createRemoteBashOperations(remote, this.cwd)
+              : createProjectCommandBashOperations({
+                  shellPath: this.inner.settingsManager.getShellPath(),
+                }),
           },
         );
         try {
@@ -2013,6 +2025,7 @@ export async function startRpcSession(
     sessionManager = SessionManager.create(cwd, undefined);
   }
   const sessionCwd = sessionManager.getCwd();
+  const remoteWorkspace = bindSessionWorkspace(sessionManager);
   const persistedFastMode = readSessionFastMode(sessionManager.getEntries() as unknown as SessionEntry[]);
   const fastMode = persistedFastMode ?? requestedFastMode ?? false;
   if (persistedFastMode === undefined && requestedFastMode !== undefined) {
@@ -2066,14 +2079,20 @@ export async function startRpcSession(
     // before the SDK restores the saved model from the session file.
     // Gate untrusted project extensions so opening a repository does not run
     // its .pi/extensions code automatically (see lib/project-trust.ts, #236).
-    const trustReloadOptions = subagentResources
+    const trustReloadOptions = remoteWorkspace
+      ? { resolveProjectTrust: async () => false }
+      : subagentResources
       ? subagentLoadsResources
         ? projectTrustReloadOptions(sessionCwd, agentDir)
         : undefined
       : chatOnly
         ? undefined
         : projectTrustReloadOptions(sessionCwd, agentDir);
-    const settingsManager = SettingsManager.create(sessionCwd, agentDir);
+    const settingsManager = createWorkspaceSettings(sessionCwd, agentDir, Boolean(remoteWorkspace));
+    if (remoteWorkspace && toolsOption) toolsOption = resolveShellTools(toolsOption, ["bash"], "linux");
+    const agentsFilesOverride = remoteWorkspace && !subagentResources
+      ? await remoteContextOverride(remoteWorkspace, sessionCwd, agentDir)
+      : undefined;
     const services = await createAgentSessionServices({
       cwd: sessionCwd,
       agentDir,
@@ -2092,25 +2111,34 @@ export async function startRpcSession(
                 }
               : {}),
             appendSystemPrompt: subagentResources.appendSystemPrompt,
+            ...(!chatOnly ? { extensionFactories: [
+              createSubagentProgressExtension(SUBAGENT_CONTROLLER.reportProgress),
+              ...(remoteWorkspace ? [createRemoteAgentExtension(remoteWorkspace, sessionCwd)] : []),
+            ] } : {}),
+            extensionsOverride: (base) => preferRemoteWorkspaceExtension(base, Boolean(remoteWorkspace)),
           }
         : chatOnly
-          ? CHAT_ONLY_RESOURCE_LOADER_OPTIONS
+          ? { ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS, ...(agentsFilesOverride ? { agentsFilesOverride } : {}) }
         : {
+            ...(agentsFilesOverride ? { agentsFilesOverride } : {}),
             extensionFactories: [
-              createProjectCommandBashExtension({
-                cwd: sessionCwd,
-                settings: settingsManager,
-              }),
+              ...(remoteWorkspace
+                ? [createRemoteAgentExtension(remoteWorkspace, sessionCwd)]
+                : [createProjectCommandBashExtension({ cwd: sessionCwd, settings: settingsManager })]),
               createSubagentExtension(
                 SUBAGENT_CONTROLLER.extensionRuntime,
                 () => listSubagentProfiles(sessionCwd),
                 isBuiltInSubagentsEnabled,
               ),
             ],
-            extensionsOverride: (base) => preferUserBashExtension(preferPiWebSubagentExtension(base)),
+            extensionsOverride: (base) => preferUserBashExtension(preferPiWebSubagentExtension(preferRemoteWorkspaceExtension(base, Boolean(remoteWorkspace)))),
           },
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
     });
+    if (remoteWorkspace && !chatOnly && !services.resourceLoader.getExtensions().extensions.some((extension) =>
+      extension.path.startsWith("<inline:") && ["read", "write", "edit", "bash", "grep", "find", "ls"].every((name) => extension.tools.has(name)))) {
+      throw new Error("Remote workspace tools failed to load; local fallback was blocked");
+    }
     const scope = await resolveVisibleModels(
       services.modelRuntime,
       services.settingsManager.getEnabledModels(),
@@ -2175,7 +2203,7 @@ export async function startRpcSession(
     }
 
     const exactSystemPrompt = subagentResources?.exactSystemPrompt !== undefined
-      ? () => subagentResources.exactSystemPrompt!
+      ? () => subagentResources.exactSystemPrompt! + (remoteWorkspace && !chatOnly ? `\n\n${remoteEnvironmentPrompt(remoteWorkspace, sessionCwd)}` : "")
       : chatOnly
         ? subagentResources
           ? () => subagentResources.appendSystemPrompt[0] ?? ""

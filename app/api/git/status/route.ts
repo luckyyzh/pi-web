@@ -2,6 +2,7 @@ import fs from "fs";
 import { NextRequest, NextResponse } from "next/server";
 import { getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed, isWindowsAbsolutePath } from "@/lib/file-access";
 import { getGitStatus } from "@/lib/git-changes";
+import { resolveRemoteWorkspace } from "@/lib/remote-workspace";
 
 export async function GET(request: NextRequest) {
   try {
@@ -13,6 +14,15 @@ export async function GET(request: NextRequest) {
     const allowedRoots = await getAllowedFileRoots();
     if (!isFilePathAllowed(cwd, allowedRoots)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    }
+
+    // A persisted remote binding takes precedence over the local filesystem:
+    // shadow subdirectories are usually absent locally, so after the lexical
+    // check above the mapping is verified by git over SSH instead of a local
+    // stat/realpath. resolveRemoteWorkspace throws for unknown or orphaned
+    // shadows — fail closed, never fall back to local execution.
+    if (resolveRemoteWorkspace(cwd)) {
+      return NextResponse.json(await getGitStatus(cwd, { signal: request.signal }));
     }
 
     let stat: fs.Stats;
@@ -28,7 +38,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
 
-    return NextResponse.json(await getGitStatus(cwd));
+    return NextResponse.json(await getGitStatus(cwd, { signal: request.signal }));
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }

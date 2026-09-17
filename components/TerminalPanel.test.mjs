@@ -13,6 +13,12 @@ test("terminal errors preserve server diagnostics and explain non-JSON responses
   await assert.rejects(terminalRequest("/api/terminal"), /Native module missing; run npm rebuild node-pty/);
 });
 
+test("terminalRequest passes the server-resolved target through for display", async (t) => {
+  const target = { kind: "ssh", id: "user_h1_aabbccddeeff", host: "user@h1", cwd: "/remote/project" };
+  t.mock.method(globalThis, "fetch", async () => Response.json({ id: "abc", cwd: "/local/shadow/root", target }));
+  assert.deepEqual(await terminalRequest("/api/terminal/abc"), { id: "abc", cwd: "/local/shadow/root", target });
+});
+
 test("a delayed input request cannot be overtaken by typing or resize", async (t) => {
   const received = [];
   let finishFirst;

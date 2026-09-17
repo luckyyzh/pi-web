@@ -5,6 +5,7 @@ import ReactMarkdown from "react-markdown";
 import { MarkdownBody } from "./MarkdownBody";
 import { ImagePreview } from "./ImagePreview";
 import { ThinkingIcon } from "./ThinkingIcon";
+import { SubagentStatus } from "./SubagentStatus";
 import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/hooks/useI18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
@@ -1090,6 +1091,8 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
           </button>
         )}
       </div>
+
+      {subagent && <SubagentStatus details={subagent} />}
 
       {/* ── Expanded: input args ── */}
       {expanded && (isStreamingInput || !isEditTool) && (

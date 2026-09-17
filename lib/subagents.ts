@@ -7,12 +7,14 @@ import { parseFrontmatter } from "./frontmatter";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { isExistingPathWithinRoots } from "./path-security";
 import { PRESET_READ_ONLY } from "./tool-presets";
+import { resolveRemoteWorkspace } from "./remote-workspace";
 import type { SessionEntry, SubagentSessionStatus } from "./types";
+import { SUBAGENT_PROGRESS_TOOL_NAME, SUBAGENT_SCHEDULING_TYPE, type SubagentScheduling } from "./subagent-coordination";
 
 export const SUBAGENT_META_TYPE = "pi-web:subagent";
 export const SUBAGENT_STATUS_TYPE = "pi-web:subagent-status";
 export const SUBAGENT_RESULT_TYPE = "pi-web:subagent-result";
-export const SUBAGENT_CONTROL_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"] as const;
+export const SUBAGENT_CONTROL_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent", "list_subagents"] as const;
 
 export type SubagentStatus = SubagentSessionStatus;
 export type SubagentScope = "builtin" | "global" | "workspace" | "project";
@@ -41,7 +43,7 @@ export interface SubagentProfile {
   filePath?: string;
 }
 
-export interface SubagentMetadata {
+export interface SubagentMetadata extends SubagentScheduling {
   version: 1;
   parentSessionId: string;
   parentSessionPath: string;
@@ -87,7 +89,7 @@ export interface SubagentStatusMetadata {
   status: Extract<SubagentStatus, "queued" | "running">;
 }
 
-export interface SubagentRunInfo {
+export interface SubagentRunInfo extends SubagentScheduling {
   sessionId: string;
   sessionPath: string;
   parentSessionId: string;
@@ -107,7 +109,7 @@ export interface SubagentRunInfo {
 }
 
 const DEFAULT_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
-const BUILTIN_TOOLS = new Set(DEFAULT_TOOLS);
+const BUILTIN_TOOLS = new Set([...DEFAULT_TOOLS, "powershell"]);
 const SUBAGENT_CONTROL_TOOLS = new Set<string>(SUBAGENT_CONTROL_TOOL_NAMES);
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -329,6 +331,8 @@ function readProfileDirectory(dir: string, scope: SubagentScope, cwd: string): S
 }
 
 function profileDirectories(cwd: string): Array<[string, Exclude<SubagentScope, "builtin">]> {
+  // A compatibility cwd may contain old copied configs; never treat them as a local project.
+  if (resolveRemoteWorkspace(cwd)) return [[join(getAgentDir(), "agents"), "global"]];
   return [
     [join(getAgentDir(), "agents"), "global"],
     [join(resolve(cwd), ".agents", "agents"), "workspace"],
@@ -372,6 +376,7 @@ function writableProfileDirectory(cwd: string, scope: SubagentWritableScope): st
 }
 
 function assertWritableProfileDirectory(cwd: string, scope: SubagentWritableScope): string {
+  if (scope !== "global" && resolveRemoteWorkspace(cwd)) throw new Error("Remote workspaces currently support global agent profiles only");
   const dir = writableProfileDirectory(cwd, scope);
   if (scope === "global") return dir;
 
@@ -516,7 +521,7 @@ export function readSubagentSessionResources(
       typeof item === "string"
       && item.length > 0
       && !SUBAGENT_CONTROL_TOOLS.has(item)
-      && (BUILTIN_TOOLS.has(item) || loadExtensions)
+      && (BUILTIN_TOOLS.has(item) || item === SUBAGENT_PROGRESS_TOOL_NAME || loadExtensions)
     )
   ) {
     return {
@@ -582,6 +587,13 @@ export function readSubagentRun(entries: readonly SessionEntry[], sessionId: str
     : statusData?.version === 1 && (statusData.status === "queued" || statusData.status === "running")
       ? statusData.status
       : "interrupted";
+  // Scheduling entries reset per execution (including resume); progress must not leak
+  // from a previous completed task into the next task on the same child session.
+  const schedulingIndex = entries.findLastIndex((entry) => entry.type === "custom" && entry.customType === SUBAGENT_SCHEDULING_TYPE);
+  const schedulingEntry = entries[schedulingIndex];
+  const scheduling = schedulingEntry?.type === "custom" && isRecord(schedulingEntry.data) && schedulingEntry.data.version === 1
+    ? schedulingEntry.data : data;
+  const progress = isRecord(scheduling.progress) ? scheduling.progress : undefined;
   return {
     sessionId,
     sessionPath,
@@ -593,6 +605,21 @@ export function readSubagentRun(entries: readonly SessionEntry[], sessionId: str
     runInBackground: data.runInBackground === true,
     status: persistedStatus,
     createdAt: typeof data.createdAt === "string" ? data.createdAt : "",
+    ...(typeof scheduling.task === "string" ? { task: scheduling.task } : {}),
+    ...(typeof scheduling.description === "string" ? { description: scheduling.description } : {}),
+    ...(typeof scheduling.parentToolCallId === "string" ? { parentToolCallId: scheduling.parentToolCallId } : {}),
+    ...(typeof scheduling.runInBackground === "boolean" ? { runInBackground: scheduling.runInBackground } : {}),
+    ...(Array.isArray(scheduling.dependsOn) ? { dependsOn: scheduling.dependsOn.filter((id): id is string => typeof id === "string") } : {}),
+    ...(Array.isArray(scheduling.waitingFor) ? { waitingFor: scheduling.waitingFor.filter((id): id is string => typeof id === "string") } : {}),
+    ...(typeof scheduling.softBudgetSeconds === "number" ? { softBudgetSeconds: scheduling.softBudgetSeconds } : {}),
+    ...(typeof scheduling.startedAt === "string" ? { startedAt: scheduling.startedAt } : {}),
+    ...(typeof scheduling.budgetExceededAt === "string" ? { budgetExceededAt: scheduling.budgetExceededAt } : {}),
+    ...(progress && typeof progress.summary === "string" && typeof progress.updatedAt === "string" ? { progress: {
+      summary: progress.summary,
+      updatedAt: progress.updatedAt,
+      ...(typeof progress.remaining === "string" ? { remaining: progress.remaining } : {}),
+      ...(typeof progress.blocked === "string" ? { blocked: progress.blocked } : {}),
+    } } : {}),
     ...(result && typeof result.completedAt === "string" ? { completedAt: result.completedAt } : {}),
     ...(result && typeof result.result === "string" ? { result: result.result } : {}),
     ...(result && typeof result.error === "string" ? { error: result.error } : {}),

@@ -8,8 +8,7 @@ import {
   isRemoteModeActive,
   loadSshConfig,
   saveSshConfig,
-  sshExec,
-  syncShadowProject,
+  sshResolveDirectory,
 } from "@/lib/ssh";
 import { projectIdentityKey } from "@/lib/project-identity";
 import { resolveProject } from "@/lib/worktree";
@@ -23,8 +22,7 @@ function normalizeCwd(cwd: string): string {
 /** 通过 ssh 把远程路径规范化（支持 ~ / . / ..），失败返回 null */
 async function resolveRemotePath(host: string, raw: string): Promise<string | null> {
   try {
-    const out = (await sshExec(host, `cd ${JSON.stringify(raw)} && pwd`, 15_000)).trim();
-    return out || null;
+    return await sshResolveDirectory(host, raw);
   } catch {
     return null;
   }
@@ -33,7 +31,7 @@ async function resolveRemotePath(host: string, raw: string): Promise<string | nu
 // POST /api/cwd/validate  body: { cwd: string }
 // 本地模式：校验本地目录。
 // 远程模式（ssh 启用）：把 cwd 当作远程路径校验，更新 ssh-config 的 path，
-//   创建/返回影子根作为会话 cwd，并同步 AGENTS/.pi/.agents。
+//   创建/返回兼容会话 cwd 并持久绑定远程目标；不复制远程可执行配置。
 export async function POST(req: Request) {
   try {
     const body = await req.json() as { cwd?: unknown };
@@ -51,13 +49,14 @@ export async function POST(req: Request) {
       if (!remotePath) {
         return NextResponse.json({ error: `远程目录不存在: ${cwd}` }, { status: 400 });
       }
-      // 切换远程目录：更新配置 + 建影子根 + 同步
+      // 切换选择，不修改已注册工作区的执行身份。
       const next = { ...sshCfg, path: remotePath };
-      saveSshConfig(next);
       const shadowRoot = ensureShadowRoot(next);
-      await syncShadowProject(next);
+      saveSshConfig(next);
       allowFileRoot(shadowRoot);
-      return NextResponse.json({ success: true, cwd: shadowRoot, remotePath, remote: true });
+      return NextResponse.json({ success: true, cwd: shadowRoot, remotePath, remote: true,
+        projectRoot: shadowRoot, projectKey: projectIdentityKey(shadowRoot),
+      });
     }
 
     // ---- 本地模式 ----

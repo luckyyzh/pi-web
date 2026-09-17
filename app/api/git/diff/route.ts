@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed, isWindowsAbsolutePath } from "@/lib/file-access";
 import { getGitFileDiff } from "@/lib/git-changes";
+import { resolveRemoteWorkspace } from "@/lib/remote-workspace";
 
 export async function GET(request: NextRequest) {
   try {
@@ -17,6 +18,16 @@ export async function GET(request: NextRequest) {
     if (!isFilePathAllowed(cwd, allowedRoots) || !isFilePathAllowed(filePath, allowedRoots)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
+
+    // A persisted remote binding takes precedence over the local filesystem:
+    // shadow subdirectories are usually absent locally, so authorization is
+    // lexical and git verifies the repository over SSH. Orphaned shadows
+    // throw (fail closed; never fall back to local execution). A file outside
+    // the bound workspace is rejected by getGitFileDiff itself.
+    if (resolveRemoteWorkspace(cwd)) {
+      return NextResponse.json(await getGitFileDiff(cwd, filePath, { signal: request.signal }));
+    }
+
     // The cwd must resolve inside an allowed root. The file itself may no
     // longer exist when Git reports it as deleted; getGitFileDiff verifies
     // that the requested path belongs to this repository and its status.
@@ -24,7 +35,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
 
-    return NextResponse.json(await getGitFileDiff(cwd, filePath));
+    return NextResponse.json(await getGitFileDiff(cwd, filePath, { signal: request.signal }));
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }

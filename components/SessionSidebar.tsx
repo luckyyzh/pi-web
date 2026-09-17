@@ -8,6 +8,7 @@ import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
 import { getProjectActivity, getRecentProjects, sessionsForProject } from "@/lib/project-groups";
 import { workspaceKeyOf } from "@/lib/workspace-memory";
+import { workspaceTargetLabel, type WorkspaceTarget } from "@/lib/workspace-target";
 import { formatRelativeTime } from "@/lib/i18n/format";
 import { useI18n } from "@/hooks/useI18n";
 import { DirectoryPicker } from "./DirectoryPicker";
@@ -406,7 +407,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [validatedProject, setValidatedProject] = useState<ValidatedProject | null>(null);
   const [sshInfo, setSshInfo] = useState<{ enabled: boolean; host: string; path: string; shadowRoot: string | null } | null>(null);
   // 远程模式启用/退出时的切换辅助
-  const prevSshEnabledRef = useRef<boolean | null>(null);
+  const prevSshSelectionRef = useRef<string | null>(null);
+  const [workspaceTarget, setWorkspaceTarget] = useState<{ forCwd: string; target: WorkspaceTarget } | null>(null);
   const localCwdBeforeSshRef = useRef<string | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   // Worktree switcher state
@@ -822,11 +824,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // 切换会话时该 prop 可能为 null（selectedSession/newSessionCwd 均为空）。
   useEffect(() => {
     if (!sshInfo) return;
-    const enabled = sshInfo.enabled;
-    const wasEnabled = prevSshEnabledRef.current ?? false;
-    prevSshEnabledRef.current = enabled;
-    if (enabled === wasEnabled) return;
-    if (enabled) {
+    const selection = sshInfo.enabled ? sshInfo.shadowRoot : null;
+    if (selection === prevSshSelectionRef.current) return;
+    prevSshSelectionRef.current = selection;
+    if (selection) {
       // 进入远程：记住本地 cwd，切到影子根（文件浏览器随之显示远程目录）
       if (!localCwdBeforeSshRef.current && selectedCwd) localCwdBeforeSshRef.current = selectedCwd;
       if (sshInfo.shadowRoot && selectedCwd !== sshInfo.shadowRoot) {
@@ -839,6 +840,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       if (back && selectedCwd !== back) setSelectedCwd(back);
     }
   }, [sshInfo, selectedCwd]);
+
+  useEffect(() => {
+    if (!selectedCwd) return;
+    let cancelled = false;
+    fetch(`/api/workspace?cwd=${encodeURIComponent(selectedCwd)}`)
+      .then((response) => response.ok ? response.json() : null)
+      .then((data) => { if (!cancelled) setWorkspaceTarget(data?.target ? { forCwd: selectedCwd, target: data.target } : null); })
+      .catch(() => { if (!cancelled) setWorkspaceTarget(null); });
+    return () => { cancelled = true; };
+  }, [selectedCwd, refreshKey]);
 
   const commitCustomPath = useCallback(async (candidate?: string) => {
     const path = (candidate ?? customPathValue).trim();
@@ -1178,7 +1189,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           >
             {selectedCwd ? (
               <PathLabel
-                text={displayPathForMode(selectedProject?.root ?? selectedCwd, homeDir, sshInfo)}
+                text={workspaceTarget?.forCwd === selectedCwd && workspaceTarget.target.kind === "ssh"
+                  ? workspaceTargetLabel(workspaceTarget.target)
+                  : displayPathForMode(selectedProject?.root ?? selectedCwd, homeDir, sshInfo)}
                 style={{
                   flex: 1,
                   fontFamily: "var(--font-mono)",

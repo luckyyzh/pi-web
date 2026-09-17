@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve } from "path";
 import { promisify } from "util";
 import { allowFileRoot } from "./allowed-roots";
 import { samePath, toNativePath } from "./paths";
+import { resolveRemoteWorkspace, type RemoteWorkspace } from "./remote-workspace";
 
 const execFileAsync = promisify(execFile);
 
@@ -49,6 +50,49 @@ export function invalidateProjectCache(): void {
   globalThis.__piProjectCache?.clear();
 }
 
+// ============================================================================
+// Remote workspace support
+//
+// A session cwd under a persisted remote workspace shadow root is never a
+// local git checkout — the local directory only caches project files.
+// resolveProject() is used to render session lists and must therefore stay
+// static (no SSH, no local git): it returns the stable workspace identity
+// with branch:null. Every local-repo worktree operation is explicitly
+// rejected instead of silently running on the local machine.
+// ============================================================================
+
+interface WorktreeDeps {
+  resolveWorkspace: (localPath: string) => RemoteWorkspace | null;
+}
+
+const defaultWorktreeDeps: WorktreeDeps = { resolveWorkspace: resolveRemoteWorkspace };
+let worktreeDeps: WorktreeDeps = defaultWorktreeDeps;
+
+/** Test-only: stub the workspace lookup. `null` restores the real dependencies. */
+export function setWorktreeDepsForTests(deps: Partial<WorktreeDeps> | null): void {
+  worktreeDeps = deps ? { ...defaultWorktreeDeps, ...deps } : defaultWorktreeDeps;
+}
+
+const REMOTE_WORKTREE_UNSUPPORTED = "Worktree management is not supported for remote workspaces";
+
+/**
+ * Resolve the persisted remote workspace for a cwd. Plain local paths return
+ * null. An orphaned shadow (metadata removed) counts as remote — callers must
+ * not fall back to local git on it.
+ */
+function remoteWorkspaceFor(cwd: string): RemoteWorkspace | "orphan" | null {
+  try {
+    return worktreeDeps.resolveWorkspace(cwd);
+  } catch {
+    return "orphan";
+  }
+}
+
+/** Mutating/local-repo worktree operations must never run for remote cwds. */
+function assertNotRemoteWorkspace(cwd: string): void {
+  if (remoteWorkspaceFor(cwd) !== null) throw new Error(REMOTE_WORKTREE_UNSUPPORTED);
+}
+
 async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
     timeout: 10_000,
@@ -88,6 +132,26 @@ export async function resolveProject(cwd: string): Promise<ProjectInfo> {
   if (cached && cached.expiresAt > Date.now()) return cached.info;
 
   let info: ProjectInfo;
+  const workspace = remoteWorkspaceFor(cwd);
+  if (workspace === "orphan") {
+    // No local git: an orphaned shadow directory is not a local checkout.
+    info = { projectRoot: cwd, branch: null, isWorktree: false, isTopLevel: false };
+    cache.set(cwd, { info, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
+    return info;
+  }
+  if (workspace) {
+    // Stable identity for the whole persisted workspace (independent of which
+    // subdirectory the session's cwd points at). Statically null branch: this
+    // runs while rendering session lists and must never trigger SSH.
+    info = {
+      projectRoot: workspace.localRoot,
+      branch: null,
+      isWorktree: false,
+      isTopLevel: false,
+    };
+    cache.set(cwd, { info, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
+    return info;
+  }
   try {
     if (!existsSync(cwd)) {
       info = inferRemovedWorktree(cwd) ?? { projectRoot: cwd, branch: null, isWorktree: false, isTopLevel: false };
@@ -142,6 +206,7 @@ async function getRepoRoot(cwd: string): Promise<string> {
 }
 
 export async function listWorktrees(cwd: string): Promise<WorktreeInfo[]> {
+  assertNotRemoteWorkspace(cwd);
   const out = await git(cwd, ["worktree", "list", "--porcelain"]);
   const worktrees: WorktreeInfo[] = [];
   let current: (Partial<WorktreeInfo> & { prunable?: boolean }) | null = null;
@@ -191,6 +256,7 @@ function sanitizeBranchForDir(branch: string): string {
 }
 
 export async function addWorktree(cwd: string, branch: string): Promise<{ path: string; branch: string }> {
+  assertNotRemoteWorkspace(cwd);
   const trimmed = branch.trim();
   if (!trimmed) throw new Error("Branch name is required");
 
@@ -230,6 +296,7 @@ export async function addWorktree(cwd: string, branch: string): Promise<{ path: 
 }
 
 export async function removeWorktree(cwd: string, worktreePath: string, force = false): Promise<void> {
+  assertNotRemoteWorkspace(cwd);
   const worktrees = await listWorktrees(cwd);
   const target = findWorktreeByPath(worktrees, worktreePath);
   if (!target) throw new Error(`Not a worktree of this repository: ${worktreePath}`);

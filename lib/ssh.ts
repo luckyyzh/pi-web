@@ -3,9 +3,9 @@
  *
  * 共享 SSH 工具 + 影子目录基础设施。
  *
- * 影子目录（Shadow）方案：每个远程目录映射到一个本地影子根（真实存在的空目录），
- * 让 pi 的会话/信任/AGENTS 机制"以为"它是本地项目，同时所有文件/agent 操作通过
- * 「影子路径 → 远程路径」映射走 ssh。不同远程目录 = 不同影子根 = 独立会话。
+ * 本地目录仅保留为旧会话键和项目资源缓存。执行目标单独持久化在
+ * remote-workspace.ts，文件、Agent 和终端按各自工作区绑定路由，
+ * 不再以当前全局 SSH 开关决定已有工作区的执行位置。
  *
  * 配置格式（与 ssh 扩展一致，存 ~/.pi/agent/ssh-config.json）：
  *   { "enabled": boolean, "host": "user@host", "path": "/remote/dir" | "" }
@@ -14,16 +14,12 @@
  */
 
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { quoteShellArg, registerRemoteWorkspace, remoteCacheRoot, sshArguments, normalizeRemoteCwd } from "./remote-workspace";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const CONFIG_PATH = join(homedir(), ".pi", "agent", "ssh-config.json");
-const REMOTE_BASE = join(homedir(), ".pi", "remote");
 const EXEC_TIMEOUT_MS = 30_000;
 
 export interface SshConfig {
@@ -52,33 +48,55 @@ export function saveSshConfig(cfg: SshConfig): void {
   writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), "utf8");
 }
 
+export interface SshExecOptions {
+  signal?: AbortSignal;
+  /** Returning false stops the producer and returns the captured prefix. */
+  onStdout?: (chunk: Buffer) => boolean;
+}
+
 /** 在远程执行命令，成功返回 stdout 文本，失败抛错（含 stderr） */
-export function sshExec(remote: string, command: string, timeoutMs = EXEC_TIMEOUT_MS): Promise<string> {
+export function sshExec(remote: string, command: string, timeoutMs = EXEC_TIMEOUT_MS, options: SshExecOptions = {}): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn("ssh", [remote, command], { stdio: ["ignore", "pipe", "pipe"] });
+    options.signal?.throwIfAborted();
+    const child = spawn("ssh", sshArguments(remote, command), { stdio: ["ignore", "pipe", "pipe"] });
     const chunks: Buffer[] = [];
     const errChunks: Buffer[] = [];
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill();
-    }, timeoutMs);
-    child.stdout.on("data", (d) => chunks.push(d));
-    child.stderr.on("data", (d) => errChunks.push(d));
-    child.on("error", (e) => {
+    let settled = false;
+    let bytes = 0;
+    const finish = (error?: Error, stop = false) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      reject(e);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (timedOut) {
-        reject(new Error("SSH command timed out"));
-      } else if (code !== 0) {
-        reject(new Error(`SSH failed (${code}): ${Buffer.concat(errChunks).toString()}`));
+      options.signal?.removeEventListener("abort", abort);
+      // Settle immediately: a killed SSH child is not guaranteed to emit close.
+      if (stop) child.kill();
+      if (error) reject(error);
+      else resolve(Buffer.concat(chunks).toString("utf8"));
+    };
+    const abort = () => finish(options.signal?.reason ?? new Error("SSH command aborted"), true);
+    const timer = setTimeout(() => finish(new Error("SSH command timed out"), true), timeoutMs);
+    const collect = (target: Buffer[], data: Buffer) => {
+      if (settled) return;
+      bytes += data.length;
+      if (bytes > 16 * 1024 * 1024) {
+        finish(new Error("SSH output exceeded the 16 MiB limit"), true);
       } else {
-        resolve(Buffer.concat(chunks).toString());
+        target.push(data);
+        if (target === chunks && options.onStdout) {
+          try {
+            if (!options.onStdout(data)) finish(undefined, true);
+          } catch (error) {
+            finish(error instanceof Error ? error : new Error(String(error)), true);
+          }
+        }
       }
-    });
+    };
+    child.stdout.on("data", (data: Buffer) => collect(chunks, data));
+    child.stderr.on("data", (data: Buffer) => collect(errChunks, data));
+    child.on("error", (error) => finish(error));
+    child.on("close", (code) => finish(code === 0 ? undefined : new Error(`SSH failed (${code}): ${Buffer.concat(errChunks).toString()}`)));
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) abort();
   });
 }
 
@@ -94,16 +112,13 @@ export function isRemoteModeActive(cfg?: SshConfig): boolean {
 
 /** 影子根绝对路径（确定性 hash：同一 (host, path) 永远同一影子根，保证会话/缓存前缀稳定） */
 export function shadowRootFor(host: string, remotePath: string): string {
-  const hash = createHash("sha256").update(host).update("\0").update(remotePath).digest("hex").slice(0, 12);
-  const safeHost = host.replace(/[^a-zA-Z0-9._-]/g, "_");
-  return join(REMOTE_BASE, `${safeHost}_${hash}`);
+  return remoteCacheRoot(host, remotePath);
 }
 
 /** 确保影子根目录存在并返回它 */
 export function ensureShadowRoot(cfg: SshConfig): string {
-  const root = shadowRootFor(cfg.host, cfg.path || "/");
-  mkdirSync(root, { recursive: true });
-  return root;
+  if (!cfg.path) throw new Error("请重新连接远程工作区，以解析并保存登录目录");
+  return registerRemoteWorkspace(cfg.host, cfg.path).localRoot;
 }
 
 /** 当前激活的影子根（远程模式且启用时）；否则 null */
@@ -114,8 +129,8 @@ export function activeShadowRoot(cfg?: SshConfig): string | null {
 }
 
 /**
- * 本地路径 → 远程路径。
- * 仅当 localPath 在"当前影子根"下时映射；否则返回 null。
+ * 旧接口：根据调用方传入的配置进行路径转换。
+ * @deprecated 工作区执行请用 resolveRemoteWorkspace + remotePathFor，不能依赖全局选择。
  */
 export function localToRemotePath(localPath: string, cfg: SshConfig): string | null {
   if (!isRemoteModeActive(cfg)) return null;
@@ -131,8 +146,8 @@ export function localToRemotePath(localPath: string, cfg: SshConfig): string | n
 
 /**
  * 兼容函数：把"本地根(roots) 下路径"映射为远程路径。
- * 影子方案下优先用 localToRemotePath；保留此函数用于非影子映射（如旧调用）。
- * @deprecated 新代码请用 localToRemotePath
+ * 仅为旧调用保留；不会用于新工作区路由。
+ * @deprecated 新代码请用 resolveRemoteWorkspace + remotePathFor
  */
 export function toRemotePath(localPath: string, roots: Iterable<string>, cfg: SshConfig): string | null {
   return localToRemotePath(localPath, cfg);
@@ -144,7 +159,7 @@ export function toRemotePath(localPath: string, roots: Iterable<string>, cfg: Ss
 
 /** 列出远程目录条目，返回 [{ name, isDir }]（未排序，未过滤） */
 export async function sshListDir(host: string, remoteDir: string): Promise<Array<{ name: string; isDir: boolean }>> {
-  const q = JSON.stringify(remoteDir);
+  const q = quoteShellArg(remoteDir);
   const out = await sshExec(
     host,
     `find ${q} -maxdepth 1 -mindepth 1 -printf '%f\\t%y\\n' 2>/dev/null`,
@@ -163,15 +178,16 @@ export async function sshListDir(host: string, remoteDir: string): Promise<Array
 }
 
 /** 读取远程文本文件内容（base64 传输避免编码问题） */
-export async function sshReadTextFile(host: string, remoteFile: string): Promise<{ content: string; size: number }> {
-  const q = JSON.stringify(remoteFile);
-  const [sizeRaw, b64Raw] = await Promise.all([
-    sshExec(host, `stat -c %s ${q} 2>/dev/null`).catch(() => ""),
-    sshExec(host, `base64 ${q} 2>/dev/null`).catch(() => ""),
-  ]);
-  const size = parseInt(sizeRaw.trim(), 10);
-  const content = Buffer.from(b64Raw.replace(/\s+/g, ""), "base64").toString("utf-8");
-  return { content, size: Number.isFinite(size) ? size : content.length };
+export async function sshReadTextFile(host: string, remoteFile: string, maxBytes = 256 * 1024, options: SshExecOptions = {}): Promise<{ content: string; size: number }> {
+  const q = quoteShellArg(remoteFile);
+  const sizeRaw = await sshExec(host, `stat -c %s -- ${q}`, EXEC_TIMEOUT_MS, options);
+  const byteSize = Number(sizeRaw.trim());
+  if (!Number.isFinite(byteSize) || byteSize > maxBytes) throw new Error(`File exceeds the ${maxBytes}-byte text limit`);
+  const b64Raw = await sshExec(host, `base64 -- ${q}`, EXEC_TIMEOUT_MS, options);
+  const buffer = Buffer.from(b64Raw.replace(/\s+/g, ""), "base64");
+  if (buffer.length > maxBytes) throw new Error(`File exceeds the ${maxBytes}-byte text limit`);
+  const content = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+  return { content, size: buffer.length };
 }
 
 /** 远程目录浏览（供 DirectoryPicker 远程模式用）：校验目录 + 列出子目录 + 父目录 */
@@ -191,7 +207,7 @@ export async function sshBrowse(host: string, remotePath: string): Promise<{
 
 /** 校验远程目录是否存在 */
 export async function sshPathExistsDir(host: string, remotePath: string): Promise<boolean> {
-  const q = JSON.stringify(remotePath);
+  const q = quoteShellArg(remotePath);
   try {
     await sshExec(host, `test -d ${q}`);
     return true;
@@ -200,75 +216,20 @@ export async function sshPathExistsDir(host: string, remotePath: string): Promis
   }
 }
 
-/** 测试连接：执行 pwd 确认免密可用 */
+/** Resolve login-relative paths once, before persisting a workspace identity. */
+export async function sshResolveDirectory(host: string, directory = ""): Promise<string> {
+  const target = !directory || directory === "~"
+    ? '"$HOME"'
+    : directory.startsWith("~/")
+      ? `"$HOME"/${quoteShellArg(directory.slice(2))}`
+      : quoteShellArg(directory);
+  return normalizeRemoteCwd((await sshExec(host, `cd ${target} && pwd -P`, 15_000)).trim());
+}
+
+/** 测试连接：执行 pwd 确认免密可用，不修改 known_hosts。 */
 export async function sshTestConnection(host: string, path?: string): Promise<{ ok: boolean; cwd?: string; error?: string }> {
   try {
-    const pwd = (await sshExec(host, "pwd", 10_000)).trim();
-    let cwd = pwd;
-    if (path) {
-      try {
-        cwd = (await sshExec(host, `cd ${JSON.stringify(path)} && pwd`, 10_000)).trim();
-      } catch {
-        return { ok: false, cwd: pwd, error: `远程目录不存在: ${path}` };
-      }
-    }
-    return { ok: true, cwd };
-  } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
-  }
-}
-
-// ============================================================================
-// 影子目录同步（AGENTS.md / .pi / .agents → 影子根）
-// 让 pi 的 AGENTS 注入、项目信任在远程模式下自动生效。
-// 幂等：远程内容不变则影子文件不变，不破坏 prompt 前缀缓存。
-// ============================================================================
-
-const execFileAsync = promisify(execFile);
-
-/** 探测系统 tar 可执行文件（Windows 自带 System32\tar.exe） */
-function findTar(): string {
-  const candidates = ["C:\\Windows\\System32\\tar.exe", "tar"];
-  for (const c of candidates) {
-    try {
-      if (c.includes("\\")) return existsSync(c) ? c : "";
-      return c;
-    } catch {
-      /* ignore */
-    }
-  }
-  return "tar";
-}
-
-/**
- * 把远程配置类文件同步到影子根。
- * 远程 `tar czf - AGENTS.md .pi .agents | base64` → 本地解压到影子根。
- * 仅同步这些固定名字，避免路径穿越风险。
- */
-export async function syncShadowProject(cfg: SshConfig): Promise<{ ok: boolean; error?: string }> {
-  if (!isRemoteModeActive(cfg)) return { ok: false, error: "SSH 未启用" };
-  try {
-    const root = ensureShadowRoot(cfg);
-    const remote = (cfg.path || "/").replace(/\/+$/, "");
-    const q = JSON.stringify(remote);
-    const b64 = await sshExec(
-      cfg.host,
-      `cd ${q} 2>/dev/null && tar czf - AGENTS.md AGENTS.zh-CN.md AGENTS.zh.md .pi .agents 2>/dev/null | base64 2>/dev/null || true`,
-      60_000,
-    );
-    if (b64.trim()) {
-      const buf = Buffer.from(b64.replace(/\s+/g, ""), "base64");
-      const tmp = join(tmpdir(), `pi-ssh-shadow-${createHash("sha256").update(root).digest("hex").slice(0, 10)}.tar.gz`);
-      writeFileSync(tmp, buf);
-      await execFileAsync(findTar(), ["-xzf", tmp, "-C", root]);
-      try {
-        const { unlinkSync } = await import("node:fs");
-        unlinkSync(tmp);
-      } catch {
-        /* ignore */
-      }
-    }
-    return { ok: true };
+    return { ok: true, cwd: await sshResolveDirectory(host, path) };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }

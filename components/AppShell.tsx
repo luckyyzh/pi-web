@@ -18,6 +18,7 @@ import { ToolDefinitionsPanel } from "./ToolDefinitionsPanel";
 import { AgentSessionPanel } from "./AgentSessionPanel";
 import { TerminalPanel } from "./TerminalPanel";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
+import { workspaceTargetLabel } from "@/lib/workspace-target";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile, useIsNarrowMobile } from "@/hooks/useIsMobile";
@@ -476,7 +477,7 @@ export function AppShell() {
   const [terminalsRestored, setTerminalsRestored] = useState(false);
   const panelTabs: Tab[] = [...fileTabs, ...terminalTabs.map((tab) => ({
     id: tab.id,
-    label: getFileName(tab.cwd) || tab.cwd,
+    label: tab.target?.kind === "ssh" ? workspaceTargetLabel(tab.target) : (getFileName(tab.cwd) || tab.cwd),
     filePath: tab.cwd,
     kind: "terminal" as const,
     closing: Boolean(tab.closing),
@@ -498,7 +499,7 @@ export function AppShell() {
     if (!terminalsRestored) return;
     try {
       window.sessionStorage.setItem(TERMINAL_TABS_KEY, JSON.stringify({
-        tabs: terminalTabs.map(({ id, cwd }) => ({ id, cwd })),
+        tabs: terminalTabs.map(({ id, cwd, target }) => (target ? { id, cwd, target } : { id, cwd })),
         activeId: activeFileTabId,
         open: rightPanelOpen,
       }));
@@ -1040,7 +1041,7 @@ export function AppShell() {
   }, [terminalTabs, isMobile]);
 
   const handleTerminalClosed = (tab: TerminalTab) => {
-    const replacement = tab.closing === "restart" ? newTerminalTab(tab.cwd) : null;
+    const replacement = tab.closing === "restart" ? newTerminalTab(tab.cwd, tab.target) : null;
     const remaining = terminalTabs.filter((item) => item.id !== tab.id);
     setTerminalTabs((tabs) => tabs.flatMap((item) => item.id !== tab.id ? [item] : replacement ? [replacement] : []));
     setActiveFileTabId((current) => current !== tab.id ? current : replacement?.id ?? remaining.at(-1)?.id ?? fileTabs.at(-1)?.id ?? null);
@@ -2584,6 +2585,7 @@ export function AppShell() {
                 onRestart={() => setTerminalTabs((tabs) => tabs.map((item) => item.id === tab.id ? { ...item, closing: "restart" } : item))}
                 onClosed={() => handleTerminalClosed(tab)}
                 onCloseError={() => setTerminalTabs((tabs) => tabs.map((item) => item.id === tab.id ? { ...item, closing: undefined } : item))}
+                onTarget={(target) => setTerminalTabs((tabs) => tabs.map((item) => item.id === tab.id ? { ...item, target } : item))}
               />
             </div>
           ))}

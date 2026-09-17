@@ -6,7 +6,8 @@ import { Terminal } from "@xterm/xterm";
 import { useI18n } from "@/hooks/useI18n";
 import { createTerminalWriter, terminalRequest } from "@/lib/terminal-client";
 import type { TerminalEvent } from "@/lib/terminal-manager";
-import type { TerminalTab } from "./terminal-tab-state";
+import { workspaceTargetLabel, type WorkspaceTarget } from "@/lib/workspace-target";
+import { parseWorkspaceTarget, nextExpectedTarget, verifyServerTarget, type TerminalTab } from "./terminal-tab-state";
 
 interface Props {
   tab: TerminalTab;
@@ -14,20 +15,29 @@ interface Props {
   onRestart: () => void;
   onClosed: () => void;
   onCloseError: () => void;
+  /** Server-resolved target, reported once per connection for tab display. */
+  onTarget?: (target: WorkspaceTarget) => void;
 }
 
-export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }: Props) {
+export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError, onTarget }: Props) {
   const { t } = useI18n();
   const { id, cwd, restored } = tab;
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const startRef = useRef<Promise<void>>(Promise.resolve());
   const writerRef = useRef<ReturnType<typeof createTerminalWriter> | null>(null);
-  const callbacksRef = useRef({ onClosed, onCloseError });
-  callbacksRef.current = { onClosed, onCloseError };
+  // Expected target identity at mount (storage/restart); after the first
+  // successful connection it remembers the server-resolved target so later
+  // reconnects do not accept a different one. Compared against the
+  // server-resolved target only; the ref keeps it out of the effect deps so a
+  // later target sync never re-runs the connection.
+  const expectedTargetRef = useRef<WorkspaceTarget | null>(tab.target ?? null);
+  const callbacksRef = useRef({ onClosed, onCloseError, onTarget });
+  callbacksRef.current = { onClosed, onCloseError, onTarget };
   const [status, setStatus] = useState<"connecting" | "ready" | "exited" | "error">("connecting");
   const [error, setError] = useState<string | null>(null);
   const [exitCode, setExitCode] = useState<number | null>(null);
+  const [resolvedTarget, setResolvedTarget] = useState<WorkspaceTarget | null>(null);
   const [reconnectKey, setReconnectKey] = useState(0);
 
   useEffect(() => {
@@ -42,6 +52,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
     setStatus("connecting");
     setError(null);
     setExitCode(null);
+    setResolvedTarget(null);
 
     const terminal = new Terminal({
       cursorBlink: true,
@@ -133,15 +144,28 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
 
     startRef.current = (async () => {
       fitAndResize();
-      if (restored || reconnectKey > 0) {
-        // Restoring a tab must never silently launch a replacement shell.
-        await terminalRequest(`/api/terminal/${encodeURIComponent(id)}`);
-      } else {
-        await terminalRequest("/api/terminal", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id, cwd, cols: terminal.cols, rows: terminal.rows }),
-        });
+      const expected = expectedTargetRef.current;
+      const data = restored || reconnectKey > 0
+        ? // Restoring a tab must never silently launch a replacement shell.
+          await terminalRequest(`/api/terminal/${encodeURIComponent(id)}`)
+        : await terminalRequest("/api/terminal", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            // A restart tab sends its expected identity; the server verifies
+            // it against its own resolved target before spawning (409 on
+            // mismatch). Requests without it stay compatible.
+            body: JSON.stringify({ id, cwd, cols: terminal.cols, rows: terminal.rows, ...(expected ? { target: expected } : {}) }),
+          });
+      // StrictMode re-runs effects: a superseded connection must not report a
+      // target or touch state.
+      if (disposed) return;
+      const serverTarget = parseWorkspaceTarget(data.target);
+      const mismatch = verifyServerTarget(expected, serverTarget);
+      if (mismatch) throw new Error(mismatch);
+      if (serverTarget) {
+        expectedTargetRef.current = nextExpectedTarget(expectedTargetRef.current, serverTarget);
+        setResolvedTarget(serverTarget);
+        callbacksRef.current.onTarget?.(serverTarget);
       }
       connect();
     })().catch((reason: Error) => {
@@ -177,6 +201,10 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
     };
   }, [id, cwd, restored, reconnectKey]);
 
+  const targetLabel = resolvedTarget ?? tab.target;
+  // Local terminals keep showing the local cwd; SSH targets show host:path.
+  const label = targetLabel?.kind === "ssh" ? workspaceTargetLabel(targetLabel) : cwd;
+
   useEffect(() => {
     if (active) terminalRef.current?.focus();
   }, [active]);
@@ -204,7 +232,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
       <header className="terminal-panel-header">
         <div className="terminal-panel-path">
           <span className={`terminal-status-dot is-${status}`} title={t(`terminal.${status}`)} />
-          <span title={cwd}>{cwd}</span>
+          <span title={label}>{label}</span>
         </div>
         {status === "error" && (
           <button type="button" onClick={() => setReconnectKey((key) => key + 1)} disabled={Boolean(tab.closing)} title={t("terminal.reconnect")} aria-label={t("terminal.reconnect")}>

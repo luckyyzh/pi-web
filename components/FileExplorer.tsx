@@ -102,9 +102,9 @@ async function fetchEntries(dirPath: string): Promise<FileNode[]> {
   }));
 }
 
-async function fetchGitStatus(cwd: string): Promise<GitStatusResponse> {
+async function fetchGitStatus(cwd: string, signal?: AbortSignal): Promise<GitStatusResponse> {
   const params = new URLSearchParams({ cwd });
-  const res = await fetch(`/api/git/status?${params.toString()}`);
+  const res = await fetch(`/api/git/status?${params.toString()}`, { signal });
   if (!res.ok) throw new Error(`Failed to load Git status (HTTP ${res.status})`);
   return res.json() as Promise<GitStatusResponse>;
 }
@@ -477,11 +477,16 @@ function ChangeRow({
   t: Translate;
 }) {
   const [hovered, setHovered] = useState(false);
+  // Untracked directories arrive as a single collapsed entry: show a folder
+  // row without opening a diff; contents are browsed from the file tree.
+  const isDirectory = Boolean(status.isDirectory);
   const name = getFileName(status.filePath);
-  const rel = getRelativeFilePath(status.filePath, cwd);
+  const rel = normalizeFilePathSlashes(status.filePath) === normalizeFilePathSlashes(cwd).replace(/\/$/, "")
+    ? "."
+    : getRelativeFilePath(status.filePath, cwd);
   return (
     <div
-      onClick={() => onOpenFile(status.filePath, name, { modeHint: "diff" })}
+      onClick={isDirectory ? undefined : () => onOpenFile(status.filePath, name, { modeHint: "diff" })}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       title={status.filePath}
@@ -492,7 +497,7 @@ function ChangeRow({
         paddingLeft: 10,
         paddingRight: 8,
         height: 24,
-        cursor: "pointer",
+        cursor: isDirectory ? "default" : "pointer",
         background: hovered ? "var(--bg-hover)" : "transparent",
         borderRadius: 4,
         userSelect: "none",
@@ -500,7 +505,7 @@ function ChangeRow({
     >
       <GitStatusBadge status={status} t={t} />
       <span style={{ flexShrink: 0, display: "flex", alignItems: "center", opacity: 0.85 }}>
-        {getFileIcon(name, 13)}
+        {isDirectory ? <FolderIcon size={13} /> : getFileIcon(name, 13)}
       </span>
       <span
         style={{
@@ -512,7 +517,7 @@ function ChangeRow({
           flex: 1,
         }}
       >
-        {rel}
+        {isDirectory ? `${rel}/` : rel}
       </span>
     </div>
   );
@@ -539,6 +544,11 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [highlightedPaths, setHighlightedPaths] = useState<Set<string>>(new Set());
   const [gitFiles, setGitFiles] = useState<GitFileStatus[]>([]);
   const [gitLineStats, setGitLineStats] = useState({ additions: 0, deletions: 0 });
+  const [gitTruncated, setGitTruncated] = useState(false);
+  const [gitLineStatsTruncated, setGitLineStatsTruncated] = useState(false);
+  const [gitLineStatsIncompleteReason, setGitLineStatsIncompleteReason] = useState<GitStatusResponse["lineStatsIncompleteReason"]>();
+  const gitTrackedOnly = gitLineStatsTruncated && gitLineStatsIncompleteReason === "remote-untracked";
+  const gitLineStatsWarning = gitLineStatsTruncated && gitLineStatsIncompleteReason !== "remote-untracked";
   const [uploadPhase, setUploadPhase] = useState<UploadPhase>("idle");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -788,23 +798,34 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   }, [cwd, refreshKey]);
 
   useEffect(() => {
+    // A new cwd/refresh supersedes the previous request: abort it and clear
+    // the stale results immediately so an old project's changes cannot leak
+    // into the newly selected one.
+    setGitFiles([]);
+    setGitLineStats({ additions: 0, deletions: 0 });
+    setGitTruncated(false);
+    setGitLineStatsTruncated(false);
+    setGitLineStatsIncompleteReason(undefined);
     let cancelled = false;
-    fetchGitStatus(cwd)
+    const controller = new AbortController();
+    fetchGitStatus(cwd, controller.signal)
       .then((status) => {
-        if (!cancelled) {
-          setGitFiles(status.isGitRepository ? status.files : []);
-          setGitLineStats(status.isGitRepository
-            ? { additions: status.additions, deletions: status.deletions }
-            : { additions: 0, deletions: 0 });
-        }
+        if (cancelled) return;
+        setGitFiles(status.isGitRepository ? status.files : []);
+        setGitLineStats(status.isGitRepository
+          ? { additions: status.additions, deletions: status.deletions }
+          : { additions: 0, deletions: 0 });
+        setGitTruncated(Boolean(status.truncated));
+        setGitLineStatsTruncated(Boolean(status.lineStatsTruncated));
+        setGitLineStatsIncompleteReason(status.lineStatsIncompleteReason);
       })
       .catch(() => {
-        if (!cancelled) {
-          setGitFiles([]);
-          setGitLineStats({ additions: 0, deletions: 0 });
-        }
+        // Aborted or failed: keep the cleared state from the start of this effect.
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
   }, [cwd, refreshKey, treeRefreshKey]);
 
   useEffect(() => {
@@ -1008,6 +1029,21 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       </div>
       )}
 
+      {(gitTruncated || gitLineStatsWarning) && (
+        <div role="status" style={{ padding: "0 4px 2px" }}>
+          {gitTruncated && (
+            <div title={t("files.listTruncated")} style={{ padding: "2px 10px", fontSize: 10, lineHeight: 1.4, color: "#d6a84b" }}>
+              {t("files.listTruncated")}
+            </div>
+          )}
+          {gitLineStatsWarning && (
+            <div title={t("files.lineStatsIncomplete")} style={{ padding: "2px 10px", fontSize: 10, lineHeight: 1.4, color: "#d6a84b" }}>
+              {t("files.lineStatsIncomplete")}
+            </div>
+          )}
+        </div>
+      )}
+
       {!changesCollapsed && gitFiles.length > 0 && (
         <div style={{ padding: "0 4px 2px" }}>
           <div
@@ -1019,10 +1055,13 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
             style={{ display: "flex", alignItems: "center", gap: 6, height: 24, padding: "0 10px", fontSize: 12 }}
           >
             <span style={{ color: "var(--text-dim)" }}>
-              {t("files.changedCount", { count: gitFiles.length })}
+              {t(gitTruncated ? "files.changedCountTruncated" : "files.changedCount", { count: gitFiles.length })}
             </span>
-            <span style={{ color: GIT_STATUS_COLORS.added, fontFamily: "var(--font-mono)" }}>+{gitLineStats.additions}</span>
-            <span style={{ color: GIT_STATUS_COLORS.deleted, fontFamily: "var(--font-mono)" }}>-{gitLineStats.deletions}</span>
+            <span title={gitTrackedOnly ? t("files.trackedOnlyTooltip") : gitLineStatsWarning ? t("files.lineStatsIncomplete") : undefined} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ color: GIT_STATUS_COLORS.added, fontFamily: "var(--font-mono)" }}>+{gitLineStats.additions}</span>
+              <span style={{ color: GIT_STATUS_COLORS.deleted, fontFamily: "var(--font-mono)" }}>-{gitLineStats.deletions}</span>
+              {gitTrackedOnly && <span style={{ color: "var(--text-dim)", fontSize: 10 }}>{t("files.trackedOnly")}</span>}
+            </span>
           </div>
           {gitFiles.map((status) => (
             <ChangeRow key={status.filePath} status={status} cwd={cwd} onOpenFile={onOpenFile} t={t} />
