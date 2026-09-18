@@ -70,6 +70,8 @@ interface Props {
   thinkingLevel?: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   onThinkingLevelChange?: (level: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") => void;
   availableThinkingLevels?: string[] | null;
+  /** `provider:modelId` → thinking levels the model supports (from /api/models). */
+  modelThinkingLevels?: Record<string, string[]>;
   thinkingLevelMap?: Record<string, string | null> | null;
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
   queuedMessages?: QueuedMessages | null;
@@ -551,7 +553,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelScopeWarnings, onModelChange, modelSwitching,
   fastMode, fastModeSupported, fastModeSwitching, onFastModeChange,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
-  thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
+  thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelThinkingLevels,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
@@ -568,6 +570,59 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
+  const [compactSettingsOpen, setCompactSettingsOpen] = useState(false);
+  const [compactSettings, setCompactSettings] = useState<{ model: { provider: string; modelId: string } | null; thinkingLevel: string | null; cacheAligned: boolean } | null>(null);
+  const [compactSettingsSaving, setCompactSettingsSaving] = useState(false);
+
+  // Thinking levels the given compaction model actually supports (map-null levels excluded).
+  const supportedLevelsFor = useCallback((m: { provider: string; modelId: string } | null): string[] => {
+    const list = m
+      ? (modelThinkingLevels?.[`${m.provider}:${m.modelId}`] ?? [])
+      : (availableThinkingLevels ?? []);
+    const merged = Array.from(new Set(["off", ...list]));
+    return merged.length > 0 ? merged : ["off"];
+  }, [modelThinkingLevels, availableThinkingLevels]);
+
+  const loadCompactionSettings = useCallback(() => {
+    fetch("/api/compaction-settings")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d && typeof d === "object") {
+          const model = d.model ?? null;
+          let thinkingLevel = d.thinkingLevel ?? null;
+          if (thinkingLevel && !supportedLevelsFor(model).includes(thinkingLevel)) thinkingLevel = null;
+          setCompactSettings({ model, thinkingLevel, cacheAligned: d.cacheAligned === true });
+        }
+      })
+      .catch(() => {});
+  }, [supportedLevelsFor]);
+
+  const toggleCompactSettings = useCallback(() => {
+    setCompactSettingsOpen((open) => {
+      if (!open && compactSettings === null) loadCompactionSettings();
+      return !open;
+    });
+  }, [compactSettings, loadCompactionSettings]);
+
+  const applyCompactionSetting = useCallback(async (patch: { model?: { provider: string; modelId: string } | null; thinkingLevel?: string | null; cacheAligned?: boolean }) => {
+    const prev = compactSettings;
+    if (!prev) return;
+    const next = { ...prev, ...patch };
+    setCompactSettings(next);
+    setCompactSettingsSaving(true);
+    try {
+      const res = await fetch("/api/compaction-settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(next),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch {
+      setCompactSettings(prev);
+    } finally {
+      setCompactSettingsSaving(false);
+    }
+  }, [compactSettings]);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
   ));
@@ -601,6 +656,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const toolDropdownRef = useRef<HTMLDivElement>(null);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
   const controlsMenuRef = useRef<HTMLDivElement>(null);
+  const compactSettingsRef = useRef<HTMLDivElement>(null);
   const historyMenuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
@@ -1552,6 +1608,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       }
       if (controlsMenuRef.current && !controlsMenuRef.current.contains(e.target as Node)) {
         setControlsMenuOpen(false);
+      }
+      if (compactSettingsRef.current && !compactSettingsRef.current.contains(e.target as Node)) {
+        setCompactSettingsOpen(false);
       }
       if (historyMenuRef.current && !historyMenuRef.current.contains(e.target as Node) && !textareaRef.current?.contains(e.target as Node)) {
         setHistoryMenuOpen(false);
@@ -2586,6 +2645,102 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                         </button>
                       );
                     })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {!isStreaming && onCompact && (
+              <div ref={compactSettingsRef} style={{ position: "relative" }}>
+                <button
+                  onClick={toggleCompactSettings}
+                  title={t("chat.compactionSettings")}
+                  aria-label={t("chat.compactionSettings")}
+                  style={{
+                    border: "none", background: compactSettingsOpen ? "var(--bg-hover)" : "none",
+                    color: compactSettingsOpen ? "var(--text)" : "var(--text-muted)",
+                    cursor: "pointer", padding: "4px 3px", borderRadius: 6,
+                    display: "flex", alignItems: "center",
+                  }}
+                >
+                  <svg width="9" height="12" viewBox="0 0 9 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                    <path d={compactSettingsOpen ? "M1.5 4 L4.5 7.5 L7.5 4" : "M3 1.5 L6.5 6 L3 10.5"} />
+                  </svg>
+                </button>
+                {compactSettingsOpen && compactSettings && (
+                  <div style={{
+                    position: "absolute",
+                    bottom: "calc(100% + 6px)",
+                    right: 0,
+                    zIndex: 100,
+                    width: 230,
+                    background: "var(--bg)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 8,
+                    boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
+                    padding: 10,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                  }}>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                      <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("chat.compactionModel")}</span>
+                      <select
+                        value={compactSettings.model ? `${compactSettings.model.provider}/${compactSettings.model.modelId}` : ""}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          let next: { provider: string; modelId: string } | null = null;
+                          if (v) {
+                            const i = v.indexOf("/");
+                            next = { provider: v.slice(0, i), modelId: v.slice(i + 1) };
+                          }
+                          const resetThinking = compactSettings.thinkingLevel
+                            ? { thinkingLevel: supportedLevelsFor(next).includes(compactSettings.thinkingLevel) ? compactSettings.thinkingLevel : null }
+                            : {};
+                          void applyCompactionSetting({ model: next, ...resetThinking });
+                        }}
+                        style={{ fontSize: 12, padding: "4px 6px", borderRadius: 6, background: "var(--bg-hover)", color: "var(--text)", border: "1px solid var(--border)" }}
+                      >
+                        <option value="">{t("chat.followSession")}</option>
+                        {(modelList ?? []).map((m) => (
+                          <option key={`${m.provider}/${m.id}`} value={`${m.provider}/${m.id}`}>
+                            {m.name} ({m.provider})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                      <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("chat.compactionThinking")}</span>
+                      <select
+                        value={compactSettings.thinkingLevel ?? ""}
+                        onChange={(e) => { void applyCompactionSetting({ thinkingLevel: e.target.value || null }); }}
+                        style={{ fontSize: 12, padding: "4px 6px", borderRadius: 6, background: "var(--bg-hover)", color: "var(--text)", border: "1px solid var(--border)" }}
+                      >
+                        <option value="">{t("chat.followSession")}</option>
+                        {supportedLevelsFor(compactSettings.model).map((lvl) => (
+                          <option key={lvl} value={lvl}>{lvl}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text)", cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={compactSettings.cacheAligned}
+                        onChange={(e) => { void applyCompactionSetting({ cacheAligned: e.target.checked }); }}
+                        style={{ margin: 0 }}
+                      />
+                      <span title={t("chat.compactionCacheAlignedHint")}>{t("chat.compactionCacheAligned")}</span>
+                    </label>
+                    <button
+                      onClick={() => { void applyCompactionSetting({ model: null, thinkingLevel: null, cacheAligned: false }); }}
+                      disabled={compactSettingsSaving}
+                      style={{
+                        border: "none", background: "none", color: "var(--text-muted)",
+                        fontSize: 11, cursor: "pointer", textAlign: "left", padding: 0,
+                      }}
+                    >
+                      {t("chat.resetToDefault")}
+                    </button>
                   </div>
                 )}
               </div>

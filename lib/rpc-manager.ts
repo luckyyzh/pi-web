@@ -5,6 +5,7 @@ import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
 import { resolve } from "path";
 import { ensurePersonaInjectorInstalled } from "./persona";
+import { createCompactionSettingsExtension } from "./compaction-extension";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
@@ -2114,6 +2115,7 @@ export async function startRpcSession(
             ...(!chatOnly ? { extensionFactories: [
               createSubagentProgressExtension(SUBAGENT_CONTROLLER.reportProgress),
               ...(remoteWorkspace ? [createRemoteAgentExtension(remoteWorkspace, sessionCwd)] : []),
+              createCompactionSettingsExtension(),
             ] } : {}),
             extensionsOverride: (base) => preferRemoteWorkspaceExtension(base, Boolean(remoteWorkspace)),
           }
@@ -2130,6 +2132,7 @@ export async function startRpcSession(
                 () => listSubagentProfiles(sessionCwd),
                 isBuiltInSubagentsEnabled,
               ),
+              createCompactionSettingsExtension(),
             ],
             extensionsOverride: (base) => preferUserBashExtension(preferPiWebSubagentExtension(preferRemoteWorkspaceExtension(base, Boolean(remoteWorkspace)))),
           },
