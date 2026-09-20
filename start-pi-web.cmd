@@ -77,6 +77,11 @@ if errorlevel 1 (
 )
 
 :dependencies
+REM 启动前自动更新：fork 与插件仓库有新提交时快进更新；失败只警告，不阻塞启动。
+echo [..] Checking repository updates...
+node "%~dp0bin\check-updates.js" %PI_WEB_MODE%
+if errorlevel 1 echo [WARN] Update check failed; continuing with the current version.
+
 REM 检查项目依赖，缺失时沿用 npm install 流程。
 echo [2/4] Checking pi-web dependencies...
 if not exist "node_modules\@earendil-works\pi-coding-agent" (
@@ -172,8 +177,9 @@ echo        start-pi-web.cmd help
 echo.
 echo Default: PORT environment variable or 30141; explicit ports restart the old instance.
 echo next: first free port in 30141-30199; never stops another instance.
-echo update: update extensions only; no build, server or port operations.
-echo         Does not update pi-web or the global Pi CLI.
+echo update: update the pi-web fork and the extensions repo; no build, server or port operations.
+echo         Normal startup auto-updates both repos when origin has new commits.
+echo         The global Pi CLI is never updated automatically.
 echo instance-name: 1-64 letters, digits, spaces, dots, underscores or hyphens;
 echo                supports Chinese; starts with a letter or digit; no reserved names.
 echo Named instances use USERPROFILE\.pi\pi-web-instances\name.

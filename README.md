@@ -29,6 +29,8 @@ Plugins 面板内置 MCP 管理：查看 / 添加 / 删除 / 启用禁用 / 测�
 ### 5. 一键启动脚本 `start-pi-web.cmd`（Windows）
 自动：检测 Node（需 ≥22.19）→ 安装全局 pi agent → 安装依赖（含 dev）→ 构建 → 启动；端口被占用时自动清理。
 
+启动前自动更新：检查本 fork 与配套扩展仓库，有新提交时自动快进更新（只跟自己的 fork，不碰上游；pi-web 更新后自动重新构建，扩展更新后重新同步补丁）。`start-pi-web.cmd update` 同样更新这两个仓库。全局 Pi CLI 不自动更新；无网络或本地有改动时只警告、不阻塞启动。
+
 ### 6. 一键安装 ssh 扩展
 SSH 配置弹窗内检测到未安装时，提供「一键安装」按钮（安装 pi-web 内嵌的 `vendor/ssh` 副本，离线可用）。
 
@@ -94,9 +96,9 @@ sync-upstream.cmd       # Windows：拉取官方 → 合并（README 自动保�
 或手动：
 
 ```bash
-git fetch origin
-git merge origin/main   # README 冲突由 merge=ours 自动保留本版
-git push luckyyzh main
+git fetch upstream
+git merge upstream/main   # README 冲突由 merge=ours 自动保留本版
+git push origin main
 ```
 
 > `.gitattributes` 将 `README.md` 标记为 `merge=ours`：合并时**永远保留本 fork 的 README**，官方对 README 的改动不会造成冲突，也不覆盖本文档。

@@ -43,6 +43,11 @@ function matches(source, name) {
   return s === name || s === `npm:${name}` || s.startsWith(`npm:${name}@`) || s.endsWith(`/${name}`);
 }
 
+const versionOf = (source) => {
+  const match = /^npm:.*@([^@]+)$/.exec(source);
+  return match ? match[1] : null;
+};
+
 // 仅替换官方基线/已知修复，未知本机修改报错；不会复制用户配置或历史。
 function applyPatch(repo, agentDir, item) {
   const manifestFile = path.join(repo, item.patch);
@@ -83,9 +88,12 @@ async function syncExtensions({ mode = 'ensure', agentDir, repository = REPOSITO
   const patches = [];
   for (const item of manifest.packages) {
     const existing = manager.packages().find((entry) => matches(sourceOf(entry), item.name));
+    const existingSource = existing ? sourceOf(existing) : '';
+    // 清单钉住的版本变化时重装，自动拉取的新版本才能生效。
+    const stale = !item.path && versionOf(existingSource) !== null && versionOf(existingSource) !== item.version;
     // 首次保留已有安装。本地扩展已有其它来源时不重复登记；update 显式更新清单中的 npm 包。
     const source = item.path ? path.join(repo, item.path) : `npm:${item.name}@${item.version}`;
-    if (existing && (mode === 'ensure' || item.path || !sourceOf(existing).startsWith('npm:'))) {
+    if (existing && (mode === 'ensure' || item.path || !existingSource.startsWith('npm:')) && !stale) {
       // 首次安装中途失败后重试，仍须完成已登记包的修复，不能只留下完成标记。
       if (item.patch && sourceOf(existing) === source) patches.push(item);
       continue;
