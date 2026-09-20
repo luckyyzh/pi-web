@@ -104,6 +104,17 @@ async function syncExtensions({ mode = 'ensure', agentDir, repository = REPOSITO
   }
   // 所有 npm 安装结束后再应用修复，避免后续依赖安装覆盖补丁。
   for (const item of patches) applyPatch(repo, agentDir, item);
+  // 仓库 skills/ 独立 Skill 复制到 agentDir/skills：同名目录覆盖，不删除其它本地 Skill。
+  const skillsRoot = path.join(repo, 'skills');
+  if (fs.existsSync(skillsRoot)) {
+    for (const entry of fs.readdirSync(skillsRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const dest = path.join(agentDir, 'skills', entry.name);
+      fs.mkdirSync(dest, { recursive: true });
+      fs.cpSync(path.join(skillsRoot, entry.name), dest, { recursive: true });
+      log(`[extensions] Synced skill ${entry.name}.`);
+    }
+  }
   fs.writeFileSync(marker, 'installed\n');
   log('[extensions] Done. Use start-pi-web.cmd update to update manually.');
 }
