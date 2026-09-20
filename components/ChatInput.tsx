@@ -19,9 +19,10 @@ import {
   isBase64ImageWithinLimits,
 } from "@/lib/image-attachments";
 import {
-  buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
+  buildEntriesFromFiles, buildAtInsertText, buildAtMentionText, extractAtQuery, filterFileEntries,
   type AtQueryMatch, type FileIndexEntry,
 } from "@/lib/file-fuzzy";
+import { encodeFilePathForApi } from "@/lib/file-paths";
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
@@ -683,6 +684,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const compactSettingsRef = useRef<HTMLDivElement>(null);
   const historyMenuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileAttachInputRef = useRef<HTMLInputElement>(null);
+  const [fileUploadError, setFileUploadError] = useState<string | null>(null);
+  const [fileUploading, setFileUploading] = useState(false);
+  const fileUploadErrorTimerRef = useRef<number | null>(null);
   const isComposingRef = useRef(false);
   const lastCompositionEndAtRef = useRef(0);
   const slashCommandsRequestedRef = useRef(false);
@@ -910,6 +915,79 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       pendingImageCountRef.current -= imageFiles.length;
     }
   }, [compact]);
+
+  const showFileUploadError = useCallback((message: string) => {
+    setFileUploadError(message);
+    if (fileUploadErrorTimerRef.current !== null) window.clearTimeout(fileUploadErrorTimerRef.current);
+    fileUploadErrorTimerRef.current = window.setTimeout(() => setFileUploadError(null), 8000);
+  }, []);
+
+  useEffect(() => () => {
+    if (fileUploadErrorTimerRef.current !== null) window.clearTimeout(fileUploadErrorTimerRef.current);
+  }, []);
+
+  // Uploads picked files into the session cwd (reusing the file explorer's
+  // upload endpoint) and inserts each uploaded file as an @mention so the
+  // agent can read it. Chromium does not expose the picker's source path,
+  // so uploading is the only way to make a local file reachable.
+  const processAttachedFiles = useCallback(async (files: File[]) => {
+    if (compact || files.length === 0 || fileUploading) return;
+    if (!cwd) {
+      showFileUploadError(t("chat.fileUploadNoCwd"));
+      return;
+    }
+    setFileUploading(true);
+    try {
+      const formData = new FormData();
+      files.forEach((file) => formData.append("files", file, file.name));
+      const res = await fetch(
+        `/api/files/${encodeFilePathForApi(cwd)}?type=upload&conflict=overwrite`,
+        { method: "POST", body: formData },
+      );
+      const data = await res.json().catch(() => ({})) as {
+        uploaded?: string[];
+        errors?: Array<{ name: string; error: string }>;
+        error?: string;
+      };
+      if (!res.ok && res.status !== 207) {
+        throw new Error(data.error ?? `HTTP ${res.status}`);
+      }
+      const uploaded = data.uploaded ?? [];
+      const failed = data.errors ?? [];
+      if (uploaded.length === 0) {
+        throw new Error(failed[0]?.error ?? data.error ?? t("chat.fileUploadFailed"));
+      }
+      const ta = textareaRef.current;
+      if (!ta) {
+        setValue((v) => v + (v ? " " : "") + uploaded.map((name) => buildAtMentionText(name, false)).join(""));
+      } else {
+        const start = ta.selectionStart ?? ta.value.length;
+        const end = ta.selectionEnd ?? ta.value.length;
+        const before = ta.value.slice(0, start);
+        const after = ta.value.slice(end);
+        const sep = before.length > 0 && !before.endsWith(" ") ? " " : "";
+        const mentions = uploaded.map((name) => buildAtMentionText(name, false)).join("");
+        const newVal = before + sep + mentions + after;
+        valueRef.current = newVal;
+        setValue(newVal);
+        setAtQuery(null);
+        requestAnimationFrame(() => {
+          const pos = start + sep.length + mentions.length;
+          ta.setSelectionRange(pos, pos);
+          ta.focus();
+          ta.style.height = "auto";
+          ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+        });
+      }
+      if (failed.length > 0) {
+        showFileUploadError(`${t("chat.fileUploadFailed")}: ${failed.map((f) => f.name).join(", ")}`);
+      }
+    } catch (e) {
+      showFileUploadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFileUploading(false);
+    }
+  }, [compact, cwd, fileUploading, showFileUploadError, t]);
 
   const removeImage = useCallback((index: number) => {
     setAttachedImages((prev) => {
@@ -1682,6 +1760,18 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           e.target.value = "";
         }}
       />}
+      {/* Hidden file attach input (any file type) */}
+      {!compact && <input
+        ref={fileAttachInputRef}
+        type="file"
+        multiple
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          void processAttachedFiles(files);
+          e.target.value = "";
+        }}
+      />}
       <div style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
         <ModelErrorBanner error={modelError} />
         <ModelScopeWarningBanner warnings={modelScopeWarnings} />
@@ -1777,6 +1867,33 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               <path d="M3 3v5h5" />
             </svg>
              {t("chat.retrying", { attempt: retryInfo.attempt, max: retryInfo.maxAttempts })}{retryInfo.errorMessage && <span style={{ opacity: 0.7, marginLeft: 4 }}>— {retryInfo.errorMessage}</span>}
+          </div>
+        )}
+        {/* File upload error banner */}
+        {fileUploadError && (
+          <div style={{
+            marginBottom: 8, padding: "5px 10px",
+            background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.25)",
+            borderRadius: 6, fontSize: 12, color: "rgba(190,50,50,0.95)",
+            display: "flex", alignItems: "center", gap: 6,
+          }}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+            <span style={{ flex: 1, wordBreak: "break-word" }}>{fileUploadError}</span>
+            <button
+              type="button"
+              onClick={() => setFileUploadError(null)}
+              aria-label={t("chat.close")}
+              style={{ flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", width: 18, height: 18, padding: 0, border: "none", borderRadius: 4, background: "none", color: "inherit", cursor: "pointer", opacity: 0.7 }}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
+                <path d="m6 6 12 12" />
+                <path d="m18 6-12 12" />
+              </svg>
+            </button>
           </div>
         )}
         {compactResultText && (
@@ -2381,6 +2498,33 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
                 <circle cx="8.5" cy="8.5" r="1.5" />
                 <polyline points="21 15 16 10 5 21" />
+              </svg>
+            </button>
+            <button
+              onClick={() => fileAttachInputRef.current?.click()}
+              disabled={fileUploading}
+              title={t("chat.attachFile")}
+              style={{
+                flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
+                width: 32, height: 32, padding: 0,
+                background: "none", border: "none",
+                borderRadius: 9,
+                color: "var(--text-muted)",
+                cursor: fileUploading ? "wait" : "pointer",
+                opacity: fileUploading ? 0.5 : 1,
+                transition: "background 0.12s, color 0.12s",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "var(--bg-hover)";
+                e.currentTarget.style.color = "var(--text)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "none";
+                e.currentTarget.style.color = "var(--text-muted)";
+              }}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
               </svg>
             </button>
             {/* Model selector - visible always, disabled while the session or switch is busy */}
