@@ -60,6 +60,9 @@ interface Props {
   fastModeSupported?: boolean;
   fastModeSwitching?: boolean;
   onFastModeChange?: (enabled: boolean) => void;
+  /** Session-scoped sampling temperature (null/undefined = provider default). */
+  temperature?: number | null;
+  onTemperatureChange?: (value: number | null) => void;
   onCompact?: () => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
@@ -205,6 +208,15 @@ const THINKING_LEVEL_DESC_KEYS: Record<typeof THINKING_LEVELS[number], string> =
   auto: "chat.thinkingUseDefault", off: "chat.thinkingOff", minimal: "chat.thinkingMinimal", low: "chat.thinkingLow",
   medium: "chat.thinkingMedium", high: "chat.thinkingHigh", xhigh: "chat.thinkingXhigh", max: "chat.thinkingMax",
 };
+
+const TEMPERATURE_PRESETS: { value: number; descKey: string }[] = [
+  { value: 0, descKey: "chat.temperatureZeroDesc" },
+  { value: 0.3, descKey: "chat.temperatureLowDesc" },
+  { value: 0.7, descKey: "chat.temperatureMidDesc" },
+  { value: 1.0, descKey: "chat.temperatureHighDesc" },
+  { value: 1.5, descKey: "chat.temperatureVhighDesc" },
+  { value: 2.0, descKey: "chat.temperatureMaxDesc" },
+];
 
 function formatTokenCount(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
@@ -552,6 +564,7 @@ export function ModelScopeWarningBanner({ warnings }: { warnings?: string[] }) {
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelScopeWarnings, onModelChange, modelSwitching,
   fastMode, fastModeSupported, fastModeSwitching, onFastModeChange,
+  temperature, onTemperatureChange,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelThinkingLevels,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
@@ -569,6 +582,16 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
+  const [temperatureDropdownOpen, setTemperatureDropdownOpen] = useState(false);
+  const [temperatureDraft, setTemperatureDraft] = useState("");
+
+  const applyTemperatureDraft = () => {
+    if (!onTemperatureChange) return;
+    const trimmed = temperatureDraft.trim();
+    const value = trimmed === "" ? NaN : Number(trimmed);
+    setTemperatureDropdownOpen(false);
+    onTemperatureChange(Number.isFinite(value) ? value : null);
+  };
   const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
   const [compactSettingsOpen, setCompactSettingsOpen] = useState(false);
   const [compactSettings, setCompactSettings] = useState<{ model: { provider: string; modelId: string } | null; thinkingLevel: string | null; cacheAligned: boolean } | null>(null);
@@ -655,6 +678,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const toolDropdownRef = useRef<HTMLDivElement>(null);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
+  const temperatureDropdownRef = useRef<HTMLDivElement>(null);
   const controlsMenuRef = useRef<HTMLDivElement>(null);
   const compactSettingsRef = useRef<HTMLDivElement>(null);
   const historyMenuRef = useRef<HTMLDivElement>(null);
@@ -1606,6 +1630,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       if (thinkingDropdownRef.current && !thinkingDropdownRef.current.contains(e.target as Node)) {
         setThinkingDropdownOpen(false);
       }
+      if (temperatureDropdownRef.current && !temperatureDropdownRef.current.contains(e.target as Node)) {
+        setTemperatureDropdownOpen(false);
+      }
       if (controlsMenuRef.current && !controlsMenuRef.current.contains(e.target as Node)) {
         setControlsMenuOpen(false);
       }
@@ -2366,6 +2393,146 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 busy={modelSwitching}
                 isAutoSelection={isAutoModelSelection}
               />
+            )}
+            {/* Temperature - session-scoped sampling temperature next to the model chip */}
+            {onTemperatureChange && (
+              <div ref={temperatureDropdownRef} style={{ position: "relative" }}>
+                <button
+                  onClick={() => {
+                    if (isStreaming) return;
+                    if (!temperatureDropdownOpen) setTemperatureDraft(temperature != null ? String(temperature) : "");
+                    setTemperatureDropdownOpen((v) => !v);
+                  }}
+                  disabled={isStreaming}
+                  title={t("chat.temperatureHint")}
+                  aria-label={t("chat.changeTemperatureLabel")}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+                    padding: isMobile ? "0 6px" : "8px 12px",
+                    width: isMobile ? "auto" : undefined,
+                    height: 32,
+                    background: temperatureDropdownOpen ? "var(--bg-hover)" : "none",
+                    border: "none",
+                    borderRadius: 9,
+                    color: temperature == null ? "var(--text-muted)" : "var(--text)",
+                    cursor: isStreaming ? "not-allowed" : "pointer",
+                    fontSize: 12,
+                    opacity: isStreaming ? 0.5 : 1,
+                    transition: "background 0.12s, color 0.12s",
+                  }}
+                  onMouseEnter={(e) => {
+                    if (isStreaming) return;
+                    e.currentTarget.style.background = "var(--bg-hover)";
+                    e.currentTarget.style.color = "var(--text)";
+                  }}
+                  onMouseLeave={(e) => {
+                    if (temperatureDropdownOpen) e.currentTarget.style.background = "var(--bg-hover)";
+                    else e.currentTarget.style.background = "none";
+                    e.currentTarget.style.color = temperature == null ? "var(--text-muted)" : "var(--text)";
+                  }}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M14 4v10.54a4 4 0 1 1-4 0V4a2 2 0 0 1 4 0z" />
+                  </svg>
+                  {(!isMobile || controlsMenuOpen) && <span style={{ whiteSpace: "nowrap", fontFamily: temperature == null ? undefined : "var(--font-mono)" }}>{temperature == null ? t("chat.temperatureDefault") : String(temperature)}</span>}
+                </button>
+                {temperatureDropdownOpen && (
+                  <div style={{
+                    position: "absolute", bottom: "calc(100% + 6px)",
+                    ...(isMobile ? { left: 0 } : { right: 0 }),
+                    zIndex: 100, background: "var(--bg)", border: "1px solid var(--border)",
+                    borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
+                    overflow: "hidden", minWidth: 230,
+                  }}>
+                    <button
+                      onClick={() => { setTemperatureDropdownOpen(false); if (temperature !== null) onTemperatureChange(null); }}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 8,
+                        width: "100%", padding: "7px 12px",
+                        background: temperature === null ? "var(--bg-selected)" : "none",
+                        border: "none",
+                        color: temperature === null ? "var(--text)" : "var(--text-muted)",
+                        cursor: "pointer", fontSize: 12, textAlign: "left",
+                        fontWeight: temperature === null ? 600 : 400,
+                        whiteSpace: "nowrap",
+                      }}
+                      onMouseEnter={(e) => { if (temperature !== null) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                      onMouseLeave={(e) => { if (temperature !== null) e.currentTarget.style.background = "none"; }}
+                    >
+                      {temperature === null
+                        ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+                        : <span style={{ width: 10, flexShrink: 0 }} />}
+                      <span style={{ flex: 1 }}>{t("chat.temperatureDefault")}</span>
+                      <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{t("chat.temperatureDefaultDesc")}</span>
+                    </button>
+                    {TEMPERATURE_PRESETS.map((preset) => {
+                      const isActive = temperature === preset.value;
+                      return (
+                        <button
+                          key={preset.value}
+                          onClick={() => { setTemperatureDropdownOpen(false); if (!isActive) onTemperatureChange(preset.value); }}
+                          style={{
+                            display: "flex", alignItems: "center", gap: 8,
+                            width: "100%", padding: "7px 12px",
+                            background: isActive ? "var(--bg-selected)" : "none",
+                            border: "none",
+                            color: isActive ? "var(--text)" : "var(--text-muted)",
+                            cursor: "pointer", fontSize: 12, textAlign: "left",
+                            fontWeight: isActive ? 600 : 400,
+                            whiteSpace: "nowrap",
+                          }}
+                          onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                          onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "none"; }}
+                        >
+                          {isActive
+                            ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+                            : <span style={{ width: 10, flexShrink: 0 }} />}
+                          <span style={{ flex: 1, fontFamily: "var(--font-mono)" }}>{preset.value}</span>
+                          <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{t(preset.descKey)}</span>
+                        </button>
+                      );
+                    })}
+                    <div style={{ display: "flex", gap: 6, padding: "8px 12px 0" }}>
+                      <input
+                        type="number"
+                        min={0}
+                        max={2}
+                        step={0.05}
+                        value={temperatureDraft}
+                        onChange={(e) => setTemperatureDraft(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") applyTemperatureDraft(); }}
+                        placeholder="0 – 2"
+                        aria-label={t("chat.temperatureCustomLabel")}
+                        style={{
+                          flex: 1, minWidth: 0,
+                          background: "var(--bg-panel)", border: "1px solid var(--border)",
+                          borderRadius: 6, padding: "5px 8px",
+                          fontSize: 12, color: "var(--text)", outline: "none",
+                          fontFamily: "var(--font-mono)",
+                        }}
+                      />
+                      <button
+                        onClick={applyTemperatureDraft}
+                        style={{
+                          flexShrink: 0, padding: "5px 10px",
+                          background: "var(--bg-hover)", border: "1px solid var(--border)",
+                          borderRadius: 6, color: "var(--text)",
+                          fontSize: 12, fontWeight: 600, cursor: "pointer",
+                        }}
+                      >
+                        {t("chat.temperatureSet")}
+                      </button>
+                    </div>
+                    <div style={{
+                      padding: "8px 12px",
+                      borderTop: "1px solid var(--border)",
+                      fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5,
+                    }}>
+                      {t("chat.temperatureRecommended")}
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
             {/* Fast toggle - hidden when the current model lacks Codex Fast support */}
             {fastModeSupported && onFastModeChange && (

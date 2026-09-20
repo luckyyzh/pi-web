@@ -290,7 +290,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand,
-    handleToolPresetChange, handleThinkingLevelChange, handleFastModeChange, loadSlashCommands, scrollUserMsgToTop,
+    handleToolPresetChange, handleThinkingLevelChange, handleFastModeChange, handleTemperatureChange, temperature,
+    loadSlashCommands, scrollUserMsgToTop,
     loadContext, activeLeafId, scrollToBottom, scrollToMessage,
   } = useAgentSession({
     session, sessionRunning, newSessionCwd, newSessionDraftKey, onAgentEnd: wrappedOnAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked,
@@ -879,6 +880,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       fastModeSupported={fastModeSupported}
       fastModeSwitching={fastModeSwitching}
       onFastModeChange={session || isNew ? handleFastModeChange : undefined}
+      temperature={temperature}
+      onTemperatureChange={session || isNew ? handleTemperatureChange : undefined}
       onCompact={session || isNew ? handleCompact : undefined}
       onAbortCompaction={handleAbortCompaction}
       isCompacting={isCompacting}

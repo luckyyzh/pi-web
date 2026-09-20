@@ -22,6 +22,7 @@ import type { SessionEntry } from "@/lib/types";
 import { readSubagentRun, readSubagentSessionResources, SUBAGENT_META_TYPE } from "@/lib/subagents";
 import { readSessionToolSelection } from "@/lib/session-tool-selection";
 import { readSessionFastMode } from "@/lib/session-fast-mode";
+import { readSessionTemperature } from "@/lib/session-temperature";
 import { jsonResponse } from "@/lib/json-response";
 
 export async function GET(
@@ -108,6 +109,7 @@ export async function GET(
         stats,
         totalActiveMs,
         fastMode: readSessionFastMode(entries as unknown as SessionEntry[]) ?? false,
+        temperature: readSessionTemperature(entries as unknown as SessionEntry[]) ?? null,
         ...(toolNames !== undefined ? { toolNames } : {}),
       },
     );

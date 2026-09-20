@@ -44,6 +44,8 @@ export interface SessionData {
   toolNames?: string[];
   /** Session-scoped Codex Fast mode preference (default false). */
   fastMode?: boolean;
+  /** Session-scoped temperature preference (null = provider default). */
+  temperature?: number | null;
   context: {
     messages: AgentMessage[];
     entryIds: string[];
@@ -76,6 +78,7 @@ type AgentStateResponse = {
   systemPrompt?: string;
   thinkingLevel?: string;
   fastMode?: boolean;
+  temperature?: number | null;
   isStreaming?: boolean;
   isPromptRunning?: boolean;
   isBashRunning?: boolean;
@@ -313,6 +316,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // server, never persisted as a global default, and independent of thinking.
   const [fastMode, setFastMode] = useState(false);
   const [fastModeSwitching, setFastModeSwitching] = useState(false);
+  // Session-scoped sampling temperature. null = provider default; never persisted as a global default.
+  const [temperature, setTemperature] = useState<number | null>(null);
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
@@ -364,6 +369,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Fast mode selected before a new session exists; rides the ensure_session
   // request and is confirmed by its response.
   const fastModeOverrideRef = useRef<boolean | null>(null);
+  // Temperature selected before a new session exists; rides the ensure_session
+  // request and is confirmed by its response. undefined = no explicit choice.
+  const temperatureOverrideRef = useRef<number | null | undefined>(undefined);
   const promptRunIdRef = useRef(0);
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
   const modelSwitchPendingRef = useRef(false);
@@ -429,6 +437,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const syncFastMode = useCallback((state?: AgentStateResponse) => {
     if (state && state.fastMode !== undefined) setFastMode(Boolean(state.fastMode));
+    if (state && state.temperature !== undefined) setTemperature(state.temperature === null ? null : Number(state.temperature));
   }, []);
 
   const resolveComposerDraftKey = useCallback((key: string | undefined) => {
@@ -515,6 +524,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setHasEarlierMessages(d.context.hasMore);
       setToolPresetState(d.toolNames !== undefined ? getPresetFromToolNames(d.toolNames) : "default");
       if (d.fastMode !== undefined) setFastMode(Boolean(d.fastMode));
+      if (d.temperature !== undefined) setTemperature(d.temperature === null ? null : Number(d.temperature));
       setCurrentModelOverride((current) => modelSwitchPendingRef.current ? current : null);
       setError(null);
       if (d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
@@ -647,6 +657,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const selectedModel = newSessionModelOverrideRef.current;
       const selectedThinkingLevel = thinkingLevelOverrideRef.current;
       const selectedFastMode = fastModeOverrideRef.current;
+      const selectedTemperature = temperatureOverrideRef.current;
       if (selectedModel) setPendingModel(selectedModel);
       const toolNames = getToolNamesForPreset(toolPreset);
       const res = await fetch("/api/agent/new", {
@@ -661,6 +672,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             ? { thinkingLevel: selectedThinkingLevel }
             : {}),
           ...(selectedFastMode ? { fastMode: selectedFastMode } : {}),
+          ...(selectedTemperature !== undefined ? { temperature: selectedTemperature } : {}),
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -669,6 +681,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         model?: SelectedModel | null;
         thinkingLevel?: ThinkingLevelOption;
         fastMode?: boolean;
+        temperature?: number | null;
       };
       const realId = result.sessionId;
       sessionIdRef.current = realId;
@@ -683,6 +696,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setThinkingLevel(result.thinkingLevel);
       }
       if (result.fastMode !== undefined) setFastMode(Boolean(result.fastMode));
+      if (result.temperature !== undefined) setTemperature(result.temperature === null ? null : Number(result.temperature));
       return realId;
     })();
 
@@ -1921,6 +1935,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isNew]);
 
+  const handleTemperatureChange = useCallback(async (value: number | null) => {
+    setTemperature(value);
+    if (isNew && !sessionIdRef.current) {
+      temperatureOverrideRef.current = value;
+      return;
+    }
+    const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
+    if (!sid) return;
+    try {
+      await sendAgentCommand<{ temperature?: number | null }>(sid, { type: "set_temperature", temperature: value });
+    } catch (e) {
+      console.error("Failed to set temperature:", e);
+      addNotice({
+        type: "error",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }, [addNotice, isNew]);
+
   const handleFastModeChange = useCallback(async (enabled: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current || fastModeSwitching || modelSwitching || isCompacting) return;
     // Pre-creation selection: rides the ensure_session request as a
@@ -2247,6 +2280,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     data, loading, error, activeLeafId, messages, activeToolResults, entryIds, historyCursor, hasEarlierMessages, streamState,
     agentRunning, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     fastMode, fastModeSwitching, fastModeSupported,
+    temperature,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, modelSwitching, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -2264,7 +2298,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleRecallQueue,
     handleBuiltinSlashCommand,
     setNoticePaused: setPausedNoticeId,
-    handleToolPresetChange, handleThinkingLevelChange, handleFastModeChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages, loadContext,
+    handleToolPresetChange, handleThinkingLevelChange, handleFastModeChange, handleTemperatureChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages, loadContext,
     scrollToBottom, scrollUserMsgToTop, scrollToMessage,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,

@@ -59,6 +59,14 @@ import {
   withSessionFastMode,
 } from "./session-fast-mode";
 import {
+  appendSessionTemperature,
+  copySessionTemperature,
+  readSessionTemperature,
+  validateTemperature,
+  withSessionTemperature,
+  type SessionTemperature,
+} from "./session-temperature";
+import {
   appendSessionToolSelection,
   readSessionToolSelection,
   validateSessionToolSelection,
@@ -128,6 +136,7 @@ type ExtensionCommandContextActionsLike = {
 
 type AgentSessionWrapperOptions = {
   fastMode?: boolean;
+  temperature?: SessionTemperature;
   exactSystemPrompt?: () => string;
   chatOnly?: boolean;
   onAgentRunComplete?: AgentRunCompleteListener;
@@ -181,6 +190,7 @@ export interface RpcSessionStartOptions {
   allowInitialModelFallback?: boolean;
   thinkingLevel?: ThinkingLevel;
   fastMode?: boolean;
+  temperature?: SessionTemperature;
 }
 
 const CODING_TOOL_NAMES = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
@@ -258,6 +268,7 @@ export class AgentSessionWrapper {
   private readonly exactSystemPrompt?: () => string;
   private readonly chatOnly: boolean;
   private fastMode: boolean;
+  private temperature: SessionTemperature | undefined;
   private readonly onAgentRunComplete?: AgentRunCompleteListener;
   private readonly suppressCompletionNotifications: boolean;
   private unsubscribe: (() => void) | null = null;
@@ -275,8 +286,10 @@ export class AgentSessionWrapper {
     this.exactSystemPrompt = options.exactSystemPrompt;
     this.chatOnly = options.chatOnly ?? false;
     this.fastMode = options.fastMode ?? false;
+    this.temperature = options.temperature ?? undefined;
     if (this.inner.agent) {
-      this.inner.agent.onPayload = withSessionFastMode(this.inner.agent.onPayload, () => this.fastMode);
+      const fastHook = withSessionFastMode(this.inner.agent.onPayload, () => this.fastMode);
+      this.inner.agent.onPayload = withSessionTemperature(fastHook, () => this.effectiveTemperature());
     }
     this.onAgentRunComplete = options.onAgentRunComplete;
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
@@ -318,6 +331,26 @@ export class AgentSessionWrapper {
 
   getFastMode(): boolean {
     return this.fastMode;
+  }
+
+  getTemperature(): SessionTemperature | undefined {
+    return this.temperature;
+  }
+
+  /**
+   * Temperature to inject into provider payloads. Anthropic's extended thinking
+   * rejects temperature (pi itself omits it in that case), so skip injection
+   * while a reasoning model has thinking enabled.
+   */
+  private effectiveTemperature(): SessionTemperature {
+    const value = this.temperature;
+    if (value === undefined || value === null) return null;
+    const model = this.inner.model as { api?: string; reasoning?: boolean } | null | undefined;
+    if (model?.api === "anthropic-messages" && model.reasoning) {
+      const level = this.inner.agent.state?.thinkingLevel;
+      if (level && level !== "off" && level !== "none") return null;
+    }
+    return value;
   }
 
   hasSuppressedCompletionNotifications(): boolean {
@@ -737,6 +770,7 @@ export class AgentSessionWrapper {
           systemPrompt: this.inner.agent.state?.systemPrompt ?? "",
           thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
           fastMode: this.fastMode,
+          temperature: this.temperature ?? null,
           extensionStatuses: this.getExtensionStatuses(),
           extensionWidgets: this.getExtensionWidgets(),
         };
@@ -790,6 +824,7 @@ export class AgentSessionWrapper {
           }
 
           copySessionFastMode(sessionManager, forkedManager);
+          copySessionTemperature(sessionManager, forkedManager);
           if (!existsSync(newSessionFile)) {
             const header = forkedManager.getHeader();
             if (!header) throw new Error("Forked session is missing a session header");
@@ -825,6 +860,7 @@ export class AgentSessionWrapper {
 
         const forkedManager = SessionManager.open(forkedPath, sessionDir);
         copySessionFastMode(sessionManager, forkedManager);
+        copySessionTemperature(sessionManager, forkedManager);
         const newSessionId = forkedManager.getSessionId();
         cacheSessionPath(newSessionId, forkedPath);
         invalidateSessionListCache();
@@ -853,6 +889,7 @@ export class AgentSessionWrapper {
 
           const clonedManager = SessionManager.open(clonedPath, sessionDir);
           copySessionFastMode(sessionManager, clonedManager);
+          copySessionTemperature(sessionManager, clonedManager);
           const newSessionId = clonedManager.getSessionId();
           cacheSessionPath(newSessionId, clonedPath);
           invalidateSessionListCache();
@@ -892,6 +929,14 @@ export class AgentSessionWrapper {
         }
         invalidateSessionListCache();
         return null;
+      }
+
+      case "set_temperature": {
+        const value = validateTemperature(command.temperature);
+        appendSessionTemperature(this.inner.sessionManager, value);
+        this.temperature = value;
+        invalidateSessionListCache();
+        return { temperature: value };
       }
 
       case "compact": {
@@ -1859,6 +1904,7 @@ export async function setRpcSessionTools(
   const model = existing.inner.model;
   const currentThinkingLevel = existing.inner.agent.state?.thinkingLevel;
   const fastMode = existing.getFastMode();
+  const temperature = existing.getTemperature();
   await existing.shutdown();
 
   if (persistedFile) {
@@ -1871,6 +1917,7 @@ export async function setRpcSessionTools(
     ...(model ? { initialModel: { provider: model.provider, modelId: model.id } } : {}),
     allowInitialModelFallback: true,
     fastMode,
+    ...(temperature !== undefined ? { temperature } : {}),
     ...(currentThinkingLevel && THINKING_LEVEL_NAMES.has(currentThinkingLevel as ThinkingLevel)
       ? { thinkingLevel: currentThinkingLevel as ThinkingLevel }
       : {}),
@@ -2031,6 +2078,12 @@ export async function startRpcSession(
   const fastMode = persistedFastMode ?? requestedFastMode ?? false;
   if (persistedFastMode === undefined && requestedFastMode !== undefined) {
     appendSessionFastMode(sessionManager, requestedFastMode);
+  }
+  const persistedTemperature = readSessionTemperature(sessionManager.getEntries() as unknown as SessionEntry[]);
+  const requestedTemperature = options.temperature === undefined ? undefined : validateTemperature(options.temperature);
+  const temperature = persistedTemperature !== undefined ? persistedTemperature : requestedTemperature;
+  if (persistedTemperature === undefined && requestedTemperature !== undefined) {
+    appendSessionTemperature(sessionManager, requestedTemperature);
   }
   const subagentResources = sessionFile
     ? readSubagentSessionResources(
@@ -2214,6 +2267,7 @@ export async function startRpcSession(
         : undefined;
     const wrapper = new AgentSessionWrapper(inner, {
       fastMode,
+      ...(temperature !== undefined ? { temperature } : {}),
       exactSystemPrompt,
       chatOnly,
       onAgentRunComplete: (completedSessionId) => {

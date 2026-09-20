@@ -6,6 +6,7 @@ import { allowFileRoot } from "@/lib/file-access";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import { startRpcSession } from "@/lib/rpc-manager";
 import { validateFastMode } from "@/lib/session-fast-mode";
+import { validateTemperature } from "@/lib/session-temperature";
 
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -46,12 +47,13 @@ export async function POST(req: Request) {
     }
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
-    const { provider, modelId, toolNames, thinkingLevel, fastMode, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: unknown; fastMode?: unknown; [key: string]: unknown };
+    const { provider, modelId, toolNames, thinkingLevel, fastMode, temperature, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: unknown; fastMode?: unknown; temperature?: unknown; [key: string]: unknown };
     if ((provider && !modelId) || (!provider && modelId)) {
       throw new Error("provider and modelId must be provided together");
     }
     const explicitThinkingLevel = parseThinkingLevel(thinkingLevel);
     const explicitFastMode = fastMode === undefined ? undefined : validateFastMode(fastMode);
+    const explicitTemperature = temperature === undefined ? undefined : validateTemperature(temperature);
 
     // Must be unique per request: startRpcSession coalesces concurrent callers
     // that share a key onto one session. Date.now() (ms resolution) collides for
@@ -62,6 +64,7 @@ export async function POST(req: Request) {
       ...(provider && modelId ? { initialModel: { provider, modelId } } : {}),
       ...(explicitThinkingLevel ? { thinkingLevel: explicitThinkingLevel } : {}),
       ...(explicitFastMode !== undefined ? { fastMode: explicitFastMode } : {}),
+      ...(explicitTemperature !== undefined ? { temperature: explicitTemperature } : {}),
     });
 
     // Keep the files-route allowed-roots cache (see app/api/files/[...path]/route.ts)
@@ -74,6 +77,7 @@ export async function POST(req: Request) {
       model?: { id: string; provider: string };
       thinkingLevel?: string;
       fastMode?: boolean;
+      temperature?: number | null;
     };
 
     if (promptCommand.type === "ensure_session") {
@@ -86,6 +90,7 @@ export async function POST(req: Request) {
           : null,
         thinkingLevel: state.thinkingLevel,
         fastMode: state.fastMode ?? false,
+        temperature: state.temperature ?? null,
       });
     }
 
@@ -101,6 +106,7 @@ export async function POST(req: Request) {
         : null,
       thinkingLevel: state.thinkingLevel,
       fastMode: state.fastMode ?? false,
+      temperature: state.temperature ?? null,
     });
   } catch (error) {
     return NextResponse.json({

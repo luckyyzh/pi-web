@@ -20,7 +20,7 @@ test("Fast mode is a session-scoped flag defaulting to false", () => {
   assert.match(source, /const \[fastMode, setFastMode\] = useState\(false\)/);
   // Top-level flag on both the session-file payload and the live state.
   assert.match(between("export interface SessionData {", "interface AgentEvent"), /fastMode\?: boolean;/);
-  assert.match(source, /thinkingLevel\?: string;\n  fastMode\?: boolean;\n  isStreaming\?: boolean;/);
+  assert.match(source, /thinkingLevel\?: string;\n  fastMode\?: boolean;\n  temperature\?: number \| null;\n  isStreaming\?: boolean;/);
 });
 
 test("an existing-session toggle is confirmed only by the server response", () => {
