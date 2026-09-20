@@ -78,7 +78,7 @@ node bin/pi-web.js -p 30141
 
 ## 配套扩展仓库
 
-`luckyyzh/pi-web-extensions`（私有）内含独立扩展：
+`luckyyzh/pi-web-extensions`（公有）内含独立扩展：
 - `ssh` — SSH 远程执行（本 fork 远程工作区依赖）
 - `searxng-search` — 自建 SearXNG 端点提供 `web_search`
 - `describe-image` — 非视觉模型的识图能力
