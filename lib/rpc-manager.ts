@@ -59,13 +59,27 @@ import {
   withSessionFastMode,
 } from "./session-fast-mode";
 import {
+  appendSessionSampling,
   appendSessionTemperature,
-  copySessionTemperature,
+  copySessionSampling,
+  isDefaultSampling,
+  mergeSampling,
+  readSessionSampling,
   readSessionTemperature,
   validateTemperature,
-  withSessionTemperature,
+  validateTopK,
+  validateTopP,
+  withSessionSampling,
+  type SessionSampling,
+  type SessionSamplingPatch,
   type SessionTemperature,
 } from "./session-temperature";
+import {
+  readSessionDefaults,
+  updateSessionDefaultSampling,
+  updateSessionDefaultTemperature,
+  updateSessionDefaultThinkingLevel,
+} from "./session-defaults";
 import {
   appendSessionToolSelection,
   readSessionToolSelection,
@@ -137,6 +151,7 @@ type ExtensionCommandContextActionsLike = {
 type AgentSessionWrapperOptions = {
   fastMode?: boolean;
   temperature?: SessionTemperature;
+  sampling?: SessionSampling;
   exactSystemPrompt?: () => string;
   chatOnly?: boolean;
   onAgentRunComplete?: AgentRunCompleteListener;
@@ -191,6 +206,8 @@ export interface RpcSessionStartOptions {
   thinkingLevel?: ThinkingLevel;
   fastMode?: boolean;
   temperature?: SessionTemperature;
+  /** 会话级采样参数；缺省字段表示不覆盖（新建会话时回退到全局上次使用的值）。 */
+  sampling?: SessionSamplingPatch;
 }
 
 const CODING_TOOL_NAMES = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
@@ -268,7 +285,7 @@ export class AgentSessionWrapper {
   private readonly exactSystemPrompt?: () => string;
   private readonly chatOnly: boolean;
   private fastMode: boolean;
-  private temperature: SessionTemperature | undefined;
+  private sampling: SessionSampling | undefined;
   private readonly onAgentRunComplete?: AgentRunCompleteListener;
   private readonly suppressCompletionNotifications: boolean;
   private unsubscribe: (() => void) | null = null;
@@ -286,10 +303,13 @@ export class AgentSessionWrapper {
     this.exactSystemPrompt = options.exactSystemPrompt;
     this.chatOnly = options.chatOnly ?? false;
     this.fastMode = options.fastMode ?? false;
-    this.temperature = options.temperature ?? undefined;
+    this.sampling = options.sampling
+      ?? (options.temperature !== undefined
+        ? { temperature: options.temperature, topP: null, topK: null }
+        : undefined);
     if (this.inner.agent) {
       const fastHook = withSessionFastMode(this.inner.agent.onPayload, () => this.fastMode);
-      this.inner.agent.onPayload = withSessionTemperature(fastHook, () => this.effectiveTemperature());
+      this.inner.agent.onPayload = withSessionSampling(fastHook, () => this.effectiveSampling());
     }
     this.onAgentRunComplete = options.onAgentRunComplete;
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
@@ -334,17 +354,21 @@ export class AgentSessionWrapper {
   }
 
   getTemperature(): SessionTemperature | undefined {
-    return this.temperature;
+    return this.sampling?.temperature ?? undefined;
+  }
+
+  getSampling(): SessionSampling | undefined {
+    return this.sampling ? { ...this.sampling } : undefined;
   }
 
   /**
-   * Temperature to inject into provider payloads. Anthropic's extended thinking
-   * rejects temperature (pi itself omits it in that case), so skip injection
-   * while a reasoning model has thinking enabled.
+   * Sampling to inject into provider payloads. Anthropic's extended thinking
+   * rejects temperature/top_p/top_k (pi itself omits them in that case), so skip
+   * injection while a reasoning model has thinking enabled.
    */
-  private effectiveTemperature(): SessionTemperature {
-    const value = this.temperature;
-    if (value === undefined || value === null) return null;
+  private effectiveSampling(): SessionSampling | null {
+    const value = this.sampling;
+    if (!value) return null;
     const model = this.inner.model as { api?: string; reasoning?: boolean } | null | undefined;
     if (model?.api === "anthropic-messages" && model.reasoning) {
       const level = this.inner.agent.state?.thinkingLevel;
@@ -770,7 +794,9 @@ export class AgentSessionWrapper {
           systemPrompt: this.inner.agent.state?.systemPrompt ?? "",
           thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
           fastMode: this.fastMode,
-          temperature: this.temperature ?? null,
+          temperature: this.sampling?.temperature ?? null,
+          topP: this.sampling?.topP ?? null,
+          topK: this.sampling?.topK ?? null,
           extensionStatuses: this.getExtensionStatuses(),
           extensionWidgets: this.getExtensionWidgets(),
         };
@@ -824,7 +850,7 @@ export class AgentSessionWrapper {
           }
 
           copySessionFastMode(sessionManager, forkedManager);
-          copySessionTemperature(sessionManager, forkedManager);
+          copySessionSampling(sessionManager, forkedManager);
           if (!existsSync(newSessionFile)) {
             const header = forkedManager.getHeader();
             if (!header) throw new Error("Forked session is missing a session header");
@@ -860,7 +886,7 @@ export class AgentSessionWrapper {
 
         const forkedManager = SessionManager.open(forkedPath, sessionDir);
         copySessionFastMode(sessionManager, forkedManager);
-        copySessionTemperature(sessionManager, forkedManager);
+        copySessionSampling(sessionManager, forkedManager);
         const newSessionId = forkedManager.getSessionId();
         cacheSessionPath(newSessionId, forkedPath);
         invalidateSessionListCache();
@@ -889,7 +915,7 @@ export class AgentSessionWrapper {
 
           const clonedManager = SessionManager.open(clonedPath, sessionDir);
           copySessionFastMode(sessionManager, clonedManager);
-          copySessionTemperature(sessionManager, clonedManager);
+          copySessionSampling(sessionManager, clonedManager);
           const newSessionId = clonedManager.getSessionId();
           cacheSessionPath(newSessionId, clonedPath);
           invalidateSessionListCache();
@@ -927,6 +953,9 @@ export class AgentSessionWrapper {
         if (level === "xhigh" && (this.inner.model as { compat?: { thinkingFormat?: string } } | null)?.compat?.thinkingFormat === "deepseek" && this.inner.agent?.state) {
           this.inner.agent.state.thinkingLevel = "xhigh";
         }
+        // Remember the effective (post-clamp) level as the global "last used" default
+        // so brand-new sessions follow it without re-adjusting.
+        updateSessionDefaultThinkingLevel(this.inner.agent?.state?.thinkingLevel ?? level);
         invalidateSessionListCache();
         return null;
       }
@@ -934,9 +963,30 @@ export class AgentSessionWrapper {
       case "set_temperature": {
         const value = validateTemperature(command.temperature);
         appendSessionTemperature(this.inner.sessionManager, value);
-        this.temperature = value;
+        this.sampling = { temperature: value, topP: null, topK: null };
+        // Remember the choice as the global "last used" default for new sessions.
+        updateSessionDefaultTemperature(value);
+        updateSessionDefaultSampling({ topP: null, topK: null });
         invalidateSessionListCache();
+        // 保持旧返回形状，避免破坏既有调用方。
         return { temperature: value };
+      }
+
+      case "set_sampling": {
+        // 缺省字段保持当前值；显式 null 清除该字段（回到服务端默认）。
+        const current = this.sampling ?? readSessionSampling(this.inner.sessionManager.getEntries() as unknown as SessionEntry[]) ?? { temperature: null, topP: null, topK: null };
+        const next = mergeSampling(current, {
+          ...(command.temperature !== undefined ? { temperature: command.temperature as SessionTemperature } : {}),
+          ...(command.topP !== undefined ? { topP: command.topP as SessionTemperature } : {}),
+          ...(command.topK !== undefined ? { topK: command.topK as SessionTemperature } : {}),
+        });
+        appendSessionSampling(this.inner.sessionManager, next);
+        this.sampling = next;
+        // Remember the choice as the global "last used" default for new sessions.
+        updateSessionDefaultTemperature(next.temperature);
+        updateSessionDefaultSampling({ topP: next.topP, topK: next.topK });
+        invalidateSessionListCache();
+        return { sampling: next, temperature: next.temperature, topP: next.topP, topK: next.topK };
       }
 
       case "compact": {
@@ -1904,7 +1954,7 @@ export async function setRpcSessionTools(
   const model = existing.inner.model;
   const currentThinkingLevel = existing.inner.agent.state?.thinkingLevel;
   const fastMode = existing.getFastMode();
-  const temperature = existing.getTemperature();
+  const sampling = existing.getSampling();
   await existing.shutdown();
 
   if (persistedFile) {
@@ -1917,7 +1967,7 @@ export async function setRpcSessionTools(
     ...(model ? { initialModel: { provider: model.provider, modelId: model.id } } : {}),
     allowInitialModelFallback: true,
     fastMode,
-    ...(temperature !== undefined ? { temperature } : {}),
+    ...(sampling !== undefined ? { sampling } : {}),
     ...(currentThinkingLevel && THINKING_LEVEL_NAMES.has(currentThinkingLevel as ThinkingLevel)
       ? { thinkingLevel: currentThinkingLevel as ThinkingLevel }
       : {}),
@@ -2074,22 +2124,49 @@ export async function startRpcSession(
   }
   const sessionCwd = sessionManager.getCwd();
   const remoteWorkspace = bindSessionWorkspace(sessionManager);
-  const persistedFastMode = readSessionFastMode(sessionManager.getEntries() as unknown as SessionEntry[]);
-  const fastMode = persistedFastMode ?? requestedFastMode ?? false;
-  if (persistedFastMode === undefined && requestedFastMode !== undefined) {
-    appendSessionFastMode(sessionManager, requestedFastMode);
-  }
-  const persistedTemperature = readSessionTemperature(sessionManager.getEntries() as unknown as SessionEntry[]);
-  const requestedTemperature = options.temperature === undefined ? undefined : validateTemperature(options.temperature);
-  const temperature = persistedTemperature !== undefined ? persistedTemperature : requestedTemperature;
-  if (persistedTemperature === undefined && requestedTemperature !== undefined) {
-    appendSessionTemperature(sessionManager, requestedTemperature);
-  }
   const subagentResources = sessionFile
     ? readSubagentSessionResources(
         sessionManager.getEntries() as unknown as SessionEntry[],
       )
     : null;
+  // New-session detection + global "last used" defaults (temperature / thinking level)
+  // so brand-new main sessions follow the user's most recent choices without re-adjusting.
+  // Subagent sessions are excluded: they follow the parent/profile thinking level.
+  const hasExistingMessages = sessionManager.getBranch().some((entry) => entry.type === "message");
+  const sessionDefaults = readSessionDefaults();
+  const persistedFastMode = readSessionFastMode(sessionManager.getEntries() as unknown as SessionEntry[]);
+  const fastMode = persistedFastMode ?? requestedFastMode ?? false;
+  if (persistedFastMode === undefined && requestedFastMode !== undefined) {
+    appendSessionFastMode(sessionManager, requestedFastMode);
+  }
+  const persistedSampling = readSessionSampling(sessionManager.getEntries() as unknown as SessionEntry[]);
+  // 请求里的覆盖：新调用方传 sampling，旧调用方可能只传 temperature。
+  const requestedSampling: SessionSamplingPatch = {
+    ...(options.sampling ?? {}),
+    ...(options.temperature !== undefined ? { temperature: validateTemperature(options.temperature) } : {}),
+  };
+  if (requestedSampling.temperature !== undefined) requestedSampling.temperature = validateTemperature(requestedSampling.temperature);
+  if (requestedSampling.topP !== undefined) requestedSampling.topP = validateTopP(requestedSampling.topP);
+  if (requestedSampling.topK !== undefined) requestedSampling.topK = validateTopK(requestedSampling.topK);
+  // 全局「上次使用」的回退只在全新主会话上生效（子代理跟随父会话/档案）。
+  const samplingDefaults: SessionSampling = !hasExistingMessages && !subagentResources
+    ? { temperature: sessionDefaults.temperature, topP: sessionDefaults.topP, topK: sessionDefaults.topK }
+    : { temperature: null, topP: null, topK: null };
+  const requestedAny = requestedSampling.temperature !== undefined
+    || requestedSampling.topP !== undefined
+    || requestedSampling.topK !== undefined;
+  const sampling: SessionSampling | undefined = persistedSampling !== undefined
+    ? persistedSampling
+    : (requestedAny || !isDefaultSampling(samplingDefaults)
+      ? {
+          temperature: requestedSampling.temperature !== undefined ? requestedSampling.temperature : samplingDefaults.temperature,
+          topP: requestedSampling.topP !== undefined ? requestedSampling.topP : samplingDefaults.topP,
+          topK: requestedSampling.topK !== undefined ? requestedSampling.topK : samplingDefaults.topK,
+        }
+      : undefined);
+  if (persistedSampling === undefined && sampling !== undefined) {
+    appendSessionSampling(sessionManager, sampling);
+  }
   const persistedToolNames = subagentResources
     ? undefined
     : readSessionToolSelection(sessionManager.getEntries() as unknown as SessionEntry[]);
@@ -2209,6 +2286,13 @@ export async function startRpcSession(
     const defaultModelId = services.settingsManager.getDefaultModel();
     const branch = sessionManager.getBranch();
     const hasExistingMessages = branch.some((entry) => entry.type === "message");
+    // For new main sessions without an explicit thinking level, follow the last-used default.
+    // Subagent sessions are excluded: they follow the parent/profile thinking level.
+    const globalThinkingLevel =
+      !hasExistingMessages && !subagentResources && thinkingLevel === undefined && sessionDefaults.thinkingLevel !== null
+        ? (sessionDefaults.thinkingLevel as ThinkingLevel)
+        : undefined;
+    const effectiveThinkingLevel = thinkingLevel !== undefined ? thinkingLevel : globalThinkingLevel;
     const savedModel = hasExistingMessages
       ? getLatestModelChange(branch as unknown as SessionEntry[])
       : null;
@@ -2220,7 +2304,7 @@ export async function startRpcSession(
         ...(defaultProvider && defaultModelId
           ? { defaultModel: { provider: defaultProvider, modelId: defaultModelId } }
           : {}),
-        ...(thinkingLevel ? { thinkingLevel } : {}),
+        ...(effectiveThinkingLevel ? { thinkingLevel: effectiveThinkingLevel } : {}),
       });
     const startupModel = restoredModel && services.modelRuntime.hasConfiguredAuth(restoredModel.provider)
       ? restoredModel
@@ -2239,7 +2323,7 @@ export async function startRpcSession(
       services.settingsManager,
       {
         ...(effectiveInitialModel ? { model: effectiveInitialModel } : {}),
-        ...(thinkingLevel ? { thinkingLevel } : {}),
+        ...(effectiveThinkingLevel ? { thinkingLevel: effectiveThinkingLevel } : {}),
       },
       {
         ...(inner.model
@@ -2267,7 +2351,7 @@ export async function startRpcSession(
         : undefined;
     const wrapper = new AgentSessionWrapper(inner, {
       fastMode,
-      ...(temperature !== undefined ? { temperature } : {}),
+      ...(sampling !== undefined ? { sampling } : {}),
       exactSystemPrompt,
       chatOnly,
       onAgentRunComplete: (completedSessionId) => {

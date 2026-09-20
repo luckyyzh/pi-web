@@ -4,6 +4,7 @@ import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useIm
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { SkillsResponse } from "@/lib/api-types";
 import type { TextContent, UserMessage } from "@/lib/types";
+import type { SessionSamplingPatch } from "@/lib/session-temperature";
 import {
   clearDraft,
   getDraft,
@@ -61,9 +62,11 @@ interface Props {
   fastModeSupported?: boolean;
   fastModeSwitching?: boolean;
   onFastModeChange?: (enabled: boolean) => void;
-  /** Session-scoped sampling temperature (null/undefined = provider default). */
+  /** Session-scoped 采样参数（null/undefined = 服务端默认）。 */
   temperature?: number | null;
-  onTemperatureChange?: (value: number | null) => void;
+  topP?: number | null;
+  topK?: number | null;
+  onSamplingChange?: (patch: SessionSamplingPatch) => void;
   onCompact?: () => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
@@ -218,6 +221,122 @@ const TEMPERATURE_PRESETS: { value: number; descKey: string }[] = [
   { value: 1.5, descKey: "chat.temperatureVhighDesc" },
   { value: 2.0, descKey: "chat.temperatureMaxDesc" },
 ];
+
+const TOP_P_PRESETS: { value: number; descKey: string }[] = [
+  { value: 0.8, descKey: "chat.topPLowDesc" },
+  { value: 0.9, descKey: "chat.topPMidDesc" },
+  { value: 0.95, descKey: "chat.topPModelDesc" },
+  { value: 1.0, descKey: "chat.topPOffDesc" },
+];
+
+const TOP_K_PRESETS: { value: number; descKey: string }[] = [
+  { value: 20, descKey: "chat.topKNarrowDesc" },
+  { value: 50, descKey: "chat.topKMidDesc" },
+  { value: 100, descKey: "chat.topKWideDesc" },
+  { value: 200, descKey: "chat.topKWidestDesc" },
+];
+
+type SamplingField = "temperature" | "topP" | "topK";
+
+/** 采样面板的页签：三个参数一次只展开一个，否则面板会高出可视区 */
+const SAMPLING_TABS: { id: SamplingField; labelKey?: string; label?: string }[] = [
+  { id: "temperature", labelKey: "chat.samplingTabTemperature" },
+  { id: "topP", label: "top_p" },
+  { id: "topK", label: "top_k" },
+];
+
+type SamplingRowProps = {
+  label: string;
+  value: number | null;
+  presets: { value: number; descKey: string }[];
+  draft: string;
+  placeholder: string;
+  customLabel: string;
+  onDraftChange: (value: string) => void;
+  onApply: () => void;
+  onPick: (value: number | null) => void;
+};
+
+/** 采样面板里的一行：默认（服务端默认）/ 预设 / 自定义输入。三个参数共用。 */
+function SamplingRow({ label, value, presets, draft, placeholder, customLabel, onDraftChange, onApply, onPick }: SamplingRowProps) {
+  const { t } = useI18n();
+  const isDefault = value === null;
+  const check = (
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+  );
+  const rowStyle = (active: boolean): React.CSSProperties => ({
+    display: "flex", alignItems: "center", gap: 8,
+    width: "100%", padding: "6px 12px",
+    background: active ? "var(--bg-selected)" : "none",
+    border: "none",
+    color: active ? "var(--text)" : "var(--text-muted)",
+    cursor: "pointer", fontSize: 12, textAlign: "left",
+    fontWeight: active ? 600 : 400,
+    whiteSpace: "nowrap",
+  });
+  return (
+    <div style={{ borderTop: "1px solid var(--border)", paddingTop: 4, paddingBottom: 4 }}>
+      <div style={{ padding: "2px 12px", fontSize: 11, color: "var(--text-dim)", fontWeight: 600 }}>{label}</div>
+      <button
+        type="button"
+        onClick={() => { if (!isDefault) onPick(null); }}
+        style={rowStyle(isDefault)}
+        onMouseEnter={(e) => { if (!isDefault) e.currentTarget.style.background = "var(--bg-hover)"; }}
+        onMouseLeave={(e) => { if (!isDefault) e.currentTarget.style.background = "none"; }}
+      >
+        {isDefault ? check : <span style={{ width: 10, flexShrink: 0 }} />}
+        <span style={{ flex: 1 }}>{t("chat.temperatureDefault")}</span>
+        <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{t("chat.temperatureDefaultDesc")}</span>
+      </button>
+      {presets.map((preset) => {
+        const isActive = value === preset.value;
+        return (
+          <button
+            key={preset.value}
+            type="button"
+            onClick={() => { if (!isActive) onPick(preset.value); }}
+            style={rowStyle(isActive)}
+            onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
+            onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "none"; }}
+          >
+            {isActive ? check : <span style={{ width: 10, flexShrink: 0 }} />}
+            <span style={{ flex: 1, fontFamily: "var(--font-mono)" }}>{preset.value}</span>
+            <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{t(preset.descKey)}</span>
+          </button>
+        );
+      })}
+      <div style={{ display: "flex", gap: 6, padding: "6px 12px 2px" }}>
+        <input
+          type="number"
+          value={draft}
+          onChange={(e) => onDraftChange(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") onApply(); }}
+          placeholder={placeholder}
+          aria-label={customLabel}
+          style={{
+            flex: 1, minWidth: 0,
+            background: "var(--bg-panel)", border: "1px solid var(--border)",
+            borderRadius: 6, padding: "5px 8px",
+            fontSize: 12, color: "var(--text)", outline: "none",
+            fontFamily: "var(--font-mono)",
+          }}
+        />
+        <button
+          type="button"
+          onClick={onApply}
+          style={{
+            flexShrink: 0, padding: "5px 10px",
+            background: "var(--bg-hover)", border: "1px solid var(--border)",
+            borderRadius: 6, color: "var(--text)",
+            fontSize: 12, fontWeight: 600, cursor: "pointer",
+          }}
+        >
+          {t("chat.temperatureSet")}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function formatTokenCount(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
@@ -565,7 +684,7 @@ export function ModelScopeWarningBanner({ warnings }: { warnings?: string[] }) {
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelScopeWarnings, onModelChange, modelSwitching,
   fastMode, fastModeSupported, fastModeSwitching, onFastModeChange,
-  temperature, onTemperatureChange,
+  temperature, topP, topK, onSamplingChange,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelThinkingLevels,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
@@ -585,13 +704,33 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [temperatureDropdownOpen, setTemperatureDropdownOpen] = useState(false);
   const [temperatureDraft, setTemperatureDraft] = useState("");
+  const [topPDraft, setTopPDraft] = useState("");
+  const [topKDraft, setTopKDraft] = useState("");
+  const [samplingTab, setSamplingTab] = useState<SamplingField>("temperature");
 
-  const applyTemperatureDraft = () => {
-    if (!onTemperatureChange) return;
-    const trimmed = temperatureDraft.trim();
-    const value = trimmed === "" ? NaN : Number(trimmed);
+  const samplingIsDefault = (temperature ?? null) === null && (topP ?? null) === null && (topK ?? null) === null;
+  // 按钮上只显示实际生效的字段：温度、p0.9、k100。
+  const samplingLabel = samplingIsDefault
+    ? t("chat.temperatureDefault")
+    : [
+        (temperature ?? null) === null ? null : String(temperature),
+        (topP ?? null) === null ? null : `p${topP}`,
+        (topK ?? null) === null ? null : `k${topK}`,
+      ].filter((part): part is string => part !== null).join(" ");
+
+  /** 只提交发生变化的字段；空输入 = 该字段回到服务端默认，与温度控件原有行为一致。 */
+  const applySamplingDraft = (field: "temperature" | "topP" | "topK", raw: string) => {
+    if (!onSamplingChange) return;
     setTemperatureDropdownOpen(false);
-    onTemperatureChange(Number.isFinite(value) ? value : null);
+    const trimmed = raw.trim();
+    if (trimmed === "") {
+      onSamplingChange({ [field]: null } as SessionSamplingPatch);
+      return;
+    }
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed)) return;
+    const value = field === "topK" ? Math.round(parsed) : Math.round(parsed * 100) / 100;
+    onSamplingChange({ [field]: value } as SessionSamplingPatch);
   };
   const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
   const [compactSettingsOpen, setCompactSettingsOpen] = useState(false);
@@ -2538,13 +2677,17 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 isAutoSelection={isAutoModelSelection}
               />
             )}
-            {/* Temperature - session-scoped sampling temperature next to the model chip */}
-            {onTemperatureChange && (
+            {/* Sampling - session-scoped temperature / top_p / top_k next to the model chip */}
+            {onSamplingChange && (
               <div ref={temperatureDropdownRef} style={{ position: "relative" }}>
                 <button
                   onClick={() => {
                     if (isStreaming) return;
-                    if (!temperatureDropdownOpen) setTemperatureDraft(temperature != null ? String(temperature) : "");
+                    if (!temperatureDropdownOpen) {
+                      setTemperatureDraft(temperature != null ? String(temperature) : "");
+                      setTopPDraft(topP != null ? String(topP) : "");
+                      setTopKDraft(topK != null ? String(topK) : "");
+                    }
                     setTemperatureDropdownOpen((v) => !v);
                   }}
                   disabled={isStreaming}
@@ -2558,7 +2701,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     background: temperatureDropdownOpen ? "var(--bg-hover)" : "none",
                     border: "none",
                     borderRadius: 9,
-                    color: temperature == null ? "var(--text-muted)" : "var(--text)",
+                    color: samplingIsDefault ? "var(--text-muted)" : "var(--text)",
                     cursor: isStreaming ? "not-allowed" : "pointer",
                     fontSize: 12,
                     opacity: isStreaming ? 0.5 : 1,
@@ -2572,13 +2715,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   onMouseLeave={(e) => {
                     if (temperatureDropdownOpen) e.currentTarget.style.background = "var(--bg-hover)";
                     else e.currentTarget.style.background = "none";
-                    e.currentTarget.style.color = temperature == null ? "var(--text-muted)" : "var(--text)";
+                    e.currentTarget.style.color = samplingIsDefault ? "var(--text-muted)" : "var(--text)";
                   }}
                 >
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M14 4v10.54a4 4 0 1 1-4 0V4a2 2 0 0 1 4 0z" />
                   </svg>
-                  {(!isMobile || controlsMenuOpen) && <span style={{ whiteSpace: "nowrap", fontFamily: temperature == null ? undefined : "var(--font-mono)" }}>{temperature == null ? t("chat.temperatureDefault") : String(temperature)}</span>}
+                  {(!isMobile || controlsMenuOpen) && <span style={{ whiteSpace: "nowrap", fontFamily: samplingIsDefault ? undefined : "var(--font-mono)" }}>{samplingLabel}</span>}
                 </button>
                 {temperatureDropdownOpen && (
                   <div style={{
@@ -2586,93 +2729,88 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     ...(isMobile ? { left: 0 } : { right: 0 }),
                     zIndex: 100, background: "var(--bg)", border: "1px solid var(--border)",
                     borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
-                    overflow: "hidden", minWidth: 230,
+                    overflowY: "auto", overflowX: "hidden",
+                    minWidth: 240, maxHeight: "min(70vh, 420px)",
                   }}>
-                    <button
-                      onClick={() => { setTemperatureDropdownOpen(false); if (temperature !== null) onTemperatureChange(null); }}
-                      style={{
-                        display: "flex", alignItems: "center", gap: 8,
-                        width: "100%", padding: "7px 12px",
-                        background: temperature === null ? "var(--bg-selected)" : "none",
-                        border: "none",
-                        color: temperature === null ? "var(--text)" : "var(--text-muted)",
-                        cursor: "pointer", fontSize: 12, textAlign: "left",
-                        fontWeight: temperature === null ? 600 : 400,
-                        whiteSpace: "nowrap",
-                      }}
-                      onMouseEnter={(e) => { if (temperature !== null) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                      onMouseLeave={(e) => { if (temperature !== null) e.currentTarget.style.background = "none"; }}
-                    >
-                      {temperature === null
-                        ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
-                        : <span style={{ width: 10, flexShrink: 0 }} />}
-                      <span style={{ flex: 1 }}>{t("chat.temperatureDefault")}</span>
-                      <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{t("chat.temperatureDefaultDesc")}</span>
-                    </button>
-                    {TEMPERATURE_PRESETS.map((preset) => {
-                      const isActive = temperature === preset.value;
-                      return (
-                        <button
-                          key={preset.value}
-                          onClick={() => { setTemperatureDropdownOpen(false); if (!isActive) onTemperatureChange(preset.value); }}
-                          style={{
-                            display: "flex", alignItems: "center", gap: 8,
-                            width: "100%", padding: "7px 12px",
-                            background: isActive ? "var(--bg-selected)" : "none",
-                            border: "none",
-                            color: isActive ? "var(--text)" : "var(--text-muted)",
-                            cursor: "pointer", fontSize: 12, textAlign: "left",
-                            fontWeight: isActive ? 600 : 400,
-                            whiteSpace: "nowrap",
-                          }}
-                          onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                          onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "none"; }}
-                        >
-                          {isActive
-                            ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
-                            : <span style={{ width: 10, flexShrink: 0 }} />}
-                          <span style={{ flex: 1, fontFamily: "var(--font-mono)" }}>{preset.value}</span>
-                          <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{t(preset.descKey)}</span>
-                        </button>
-                      );
-                    })}
-                    <div style={{ display: "flex", gap: 6, padding: "8px 12px 0" }}>
-                      <input
-                        type="number"
-                        min={0}
-                        max={2}
-                        step={0.05}
-                        value={temperatureDraft}
-                        onChange={(e) => setTemperatureDraft(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === "Enter") applyTemperatureDraft(); }}
-                        placeholder="0 – 2"
-                        aria-label={t("chat.temperatureCustomLabel")}
-                        style={{
-                          flex: 1, minWidth: 0,
-                          background: "var(--bg-panel)", border: "1px solid var(--border)",
-                          borderRadius: 6, padding: "5px 8px",
-                          fontSize: 12, color: "var(--text)", outline: "none",
-                          fontFamily: "var(--font-mono)",
-                        }}
-                      />
-                      <button
-                        onClick={applyTemperatureDraft}
-                        style={{
-                          flexShrink: 0, padding: "5px 10px",
-                          background: "var(--bg-hover)", border: "1px solid var(--border)",
-                          borderRadius: 6, color: "var(--text)",
-                          fontSize: 12, fontWeight: 600, cursor: "pointer",
-                        }}
-                      >
-                        {t("chat.temperatureSet")}
-                      </button>
+                    <div style={{ display: "flex", gap: 2, padding: 6, borderBottom: "1px solid var(--border)" }}>
+                      {SAMPLING_TABS.map((tab) => {
+                        const active = samplingTab === tab.id;
+                        const current = tab.id === "temperature" ? temperature : tab.id === "topP" ? topP : topK;
+                        return (
+                          <button
+                            key={tab.id}
+                            type="button"
+                            onClick={() => setSamplingTab(tab.id)}
+                            style={{
+                              flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+                              padding: "5px 6px", borderRadius: 6, border: "none", cursor: "pointer",
+                              fontSize: 11, whiteSpace: "nowrap",
+                              background: active ? "var(--bg-selected)" : "none",
+                              color: active ? "var(--text)" : "var(--text-muted)",
+                              fontWeight: active ? 600 : 400,
+                            }}
+                          >
+                            {tab.labelKey ? t(tab.labelKey) : tab.label}
+                            <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: active ? "var(--accent)" : "var(--text-dim)" }}>
+                              {current != null ? String(current) : t("chat.samplingDefaultShort")}
+                            </span>
+                          </button>
+                        );
+                      })}
                     </div>
+                    {samplingTab === "temperature" && (
+                      <SamplingRow
+                        label={t("chat.temperatureLabel")}
+                        value={temperature ?? null}
+                        presets={TEMPERATURE_PRESETS}
+                        draft={temperatureDraft}
+                        placeholder="0 – 2"
+                        customLabel={t("chat.temperatureCustomLabel")}
+                        onDraftChange={setTemperatureDraft}
+                        onApply={() => applySamplingDraft("temperature", temperatureDraft)}
+                        onPick={(next) => { setTemperatureDropdownOpen(false); onSamplingChange({ temperature: next }); }}
+                      />
+                    )}
+                    {samplingTab === "topP" && (
+                      <SamplingRow
+                        label={t("chat.topPLabel")}
+                        value={topP ?? null}
+                        presets={TOP_P_PRESETS}
+                        draft={topPDraft}
+                        placeholder="0 – 1"
+                        customLabel={t("chat.topPCustomLabel")}
+                        onDraftChange={setTopPDraft}
+                        onApply={() => applySamplingDraft("topP", topPDraft)}
+                        onPick={(next) => { setTemperatureDropdownOpen(false); onSamplingChange({ topP: next }); }}
+                      />
+                    )}
+                    {samplingTab === "topK" && (
+                      <SamplingRow
+                        label={t("chat.topKLabel")}
+                        value={topK ?? null}
+                        presets={TOP_K_PRESETS}
+                        draft={topKDraft}
+                        placeholder="1 – 1000"
+                        customLabel={t("chat.topKCustomLabel")}
+                        onDraftChange={setTopKDraft}
+                        onApply={() => applySamplingDraft("topK", topKDraft)}
+                        onPick={(next) => { setTemperatureDropdownOpen(false); onSamplingChange({ topK: next }); }}
+                      />
+                    )}
                     <div style={{
                       padding: "8px 12px",
                       borderTop: "1px solid var(--border)",
                       fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5,
                     }}>
-                      {t("chat.temperatureRecommended")}
+                      {samplingTab === "temperature"
+                        ? t("chat.temperatureRecommended")
+                        : t("chat.samplingExtrasHint")}
+                      {samplingTab === "topK" && (
+                        <>
+                          <br />
+                          {t("chat.topKProviderHint")}
+                        </>
+                      )}
                     </div>
                   </div>
                 )}

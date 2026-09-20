@@ -6,7 +6,7 @@ import { allowFileRoot } from "@/lib/file-access";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import { startRpcSession } from "@/lib/rpc-manager";
 import { validateFastMode } from "@/lib/session-fast-mode";
-import { validateTemperature } from "@/lib/session-temperature";
+import { parseSamplingPatch, validateTemperature, type SessionSamplingPatch } from "@/lib/session-temperature";
 
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -47,13 +47,19 @@ export async function POST(req: Request) {
     }
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
-    const { provider, modelId, toolNames, thinkingLevel, fastMode, temperature, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: unknown; fastMode?: unknown; temperature?: unknown; [key: string]: unknown };
+    const { provider, modelId, toolNames, thinkingLevel, fastMode, temperature, sampling, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: unknown; fastMode?: unknown; temperature?: unknown; sampling?: unknown; [key: string]: unknown };
     if ((provider && !modelId) || (!provider && modelId)) {
       throw new Error("provider and modelId must be provided together");
     }
     const explicitThinkingLevel = parseThinkingLevel(thinkingLevel);
     const explicitFastMode = fastMode === undefined ? undefined : validateFastMode(fastMode);
-    const explicitTemperature = temperature === undefined ? undefined : validateTemperature(temperature);
+    // 客户端可以只传三元组里的某几项；缺项回退到全局「上次使用」的值。
+    const explicitSampling: SessionSamplingPatch | undefined = sampling === undefined && temperature === undefined
+      ? undefined
+      : {
+          ...(sampling === undefined ? {} : parseSamplingPatch(sampling)),
+          ...(temperature === undefined ? {} : { temperature: validateTemperature(temperature) }),
+        };
 
     // Must be unique per request: startRpcSession coalesces concurrent callers
     // that share a key onto one session. Date.now() (ms resolution) collides for
@@ -64,7 +70,7 @@ export async function POST(req: Request) {
       ...(provider && modelId ? { initialModel: { provider, modelId } } : {}),
       ...(explicitThinkingLevel ? { thinkingLevel: explicitThinkingLevel } : {}),
       ...(explicitFastMode !== undefined ? { fastMode: explicitFastMode } : {}),
-      ...(explicitTemperature !== undefined ? { temperature: explicitTemperature } : {}),
+      ...(explicitSampling !== undefined ? { sampling: explicitSampling } : {}),
     });
 
     // Keep the files-route allowed-roots cache (see app/api/files/[...path]/route.ts)
@@ -78,6 +84,8 @@ export async function POST(req: Request) {
       thinkingLevel?: string;
       fastMode?: boolean;
       temperature?: number | null;
+      topP?: number | null;
+      topK?: number | null;
     };
 
     if (promptCommand.type === "ensure_session") {
@@ -91,6 +99,8 @@ export async function POST(req: Request) {
         thinkingLevel: state.thinkingLevel,
         fastMode: state.fastMode ?? false,
         temperature: state.temperature ?? null,
+        topP: state.topP ?? null,
+        topK: state.topK ?? null,
       });
     }
 
@@ -107,6 +117,8 @@ export async function POST(req: Request) {
       thinkingLevel: state.thinkingLevel,
       fastMode: state.fastMode ?? false,
       temperature: state.temperature ?? null,
+      topP: state.topP ?? null,
+      topK: state.topK ?? null,
     });
   } catch (error) {
     return NextResponse.json({
