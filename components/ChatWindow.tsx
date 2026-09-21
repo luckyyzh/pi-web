@@ -452,6 +452,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     if (
       !completionNotificationsEnabled
       || !extensionDialog
+      // Selection dialogs also power browsing/pagination; clicks should not ring.
+      || extensionDialog.method === "select"
       || soundedExtensionDialogIdRef.current === extensionDialog.id
     ) return;
     soundedExtensionDialogIdRef.current = extensionDialog.id;

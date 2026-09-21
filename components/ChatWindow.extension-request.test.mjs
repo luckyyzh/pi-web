@@ -21,6 +21,13 @@ test("confines extension overlays to the content region above the composer", () 
   assert.match(customSource, /maxHeight: "min\(760px, 100%\)"/);
 });
 
+test("selection browsing stays silent while other dialog and completion notifications remain", () => {
+  const normalized = source.replace(/\r\n/g, "\n");
+  const notification = normalized.slice(normalized.indexOf("!completionNotificationsEnabled\n      || !extensionDialog"), normalized.indexOf("// Register the abort handler"));
+  assert.match(notification, /extensionDialog\.method === "select"[\s\S]*?\) return;[\s\S]*?playDoneSoundRef\.current\(\)/);
+  assert.match(source, /const wrappedOnAgentEnd = useCallback\([\s\S]*?playDoneSoundRef\.current\(\)/);
+});
+
 test("adds collapse without replacing cancel", () => {
   assert.match(dialogSource, /setCollapsed\(true\)/);
   assert.match(dialogSource, /chat\.extensionCollapse/);

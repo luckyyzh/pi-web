@@ -51,6 +51,8 @@ type ManagedWithSha = { name: string; bytes: number; sha256?: string };
 
 import { saveCheckpoint, finishCheckpoint, loadCheckpoints, readCheckpointSource, recoveryNotice, type Checkpoint } from "../src/checkpoints.ts";
 
+import { browseMemory, pickProposal } from "../src/browser.ts";
+
 const EXT_NAME = "project-memory";
 const WIDGET_ID = `${EXT_NAME}-out`;
 const CONFIG_FILE_NAME = "project-memory.json";
@@ -564,15 +566,24 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
   /* ---------- 用户命令 ---------- */
 
   pi.registerCommand("memory", {
-    description: "项目记忆管理：/memory [status|checkpoints|search <q>|show <id>|delete <id>|clear <knowledge|archive|proposals>|approve [pid]|reject <pid>]",
+    description: "项目记忆：/memory list 弹窗浏览；/memory approve 选择并审批技能；或 status|checkpoints|search|show|delete|clear|reject",
     handler: async (args, ctx) => {
-      const [cmd, ...rest] = String(args ?? "").trim().split(/\s+/);
-      const arg = rest.join(" ").trim();
+      const [command, ...rest] = String(args ?? "").trim().split(/\s+/);
+      let cmd = command;
+      let arg = rest.join(" ").trim();
       try {
         const st = await ensureState(ctx);
         if (st.disabledReason) {
           safeNotify(ctx, `${EXT_NAME} 未启用：${st.disabledReason}`, "info");
           return;
+        }
+        if (cmd === "list") {
+          if (!ctx.hasUI) throw new Error("记忆浏览需要交互界面；请使用 Pi Web 或终端交互模式。");
+          const proposalId = await browseMemory(ctx.ui, async () => (await loadStore(st.storePath)).store);
+          if (!proposalId) return;
+          // Choosing a proposal is NOT approval: continue through the existing full confirmation gate.
+          cmd = "approve";
+          arg = proposalId;
         }
         switch (cmd) {
           case undefined:
@@ -580,7 +591,9 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
           case "status": {
             const { store } = await loadStore(st.storePath);
             showLines(ctx, [...usageLines(st, store), ...store.knowledge.slice(-5).map((e) => `  · ${e.id} ${e.title}`)]);
-            safeNotify(ctx, `${EXT_NAME} 状态已显示（编辑器上方 widget）`, "info");
+            safeNotify(ctx, ctx.mode === "rpc"
+              ? `项目记忆已更新：点击底栏「${WIDGET_ID}」（可能显示为 project-me…）展开查看；输入 /memory list 可打开浏览弹窗，/memory approve 可打开审批列表。`
+              : "项目记忆状态已显示在编辑器上方面板；/memory list 打开浏览弹窗，/memory approve 打开审批列表。", "info");
             break;
           }
           case "checkpoints": {
@@ -647,21 +660,12 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
           case "approve": {
             if (st.shadow) throw new Error("影子工作区（~/.pi/remote/*）禁用 skill 发布，请使用本地项目根。");
             if (!ctx.hasUI) throw new Error("审批需要交互 UI（ctx.ui.confirm）；当前模式无 UI，已拒绝。");
-            const { store } = await loadStore(st.storePath);
             if (!arg) {
-              if (!store.proposals.length) {
-                safeNotify(ctx, "没有待审批的 skill 提案", "info");
-                break;
-              }
-              showLines(
-                ctx,
-                store.proposals.flatMap((p) => [
-                  `[${p.id}] ${p.kind} ${p.name}${p.description ? ` — ${String(p.description).slice(0, 80)}` : ""}`,
-                  `  审批：/memory approve ${p.id}；拒绝：/memory reject ${p.id}`,
-                ]),
-              );
-              break;
+              const selected = await pickProposal(ctx.ui, async () => (await loadStore(st.storePath)).store);
+              if (!selected) break;
+              arg = selected;
             }
+            const { store } = await loadStore(st.storePath);
             const capturedProposal = store.proposals.find((p) => p.id === arg);
             if (!capturedProposal) throw new Error(`未找到提案 ${arg}`);
             const captured = structuredClone(capturedProposal);

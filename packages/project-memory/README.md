@@ -115,20 +115,32 @@ Copy-Item -Recurse C:\绝对路径\pi-web\packages\project-memory $env:USERPROFI
 ## 命令（用户）
 
 ```
-/memory                      # 状态：各 bucket 用量、最近知识、handoff、待审批
+/memory                      # 状态面板：Web 端点击底栏 project-memory-out 展开
+/memory list                 # 弹窗浏览：按分类/标题选择，无需记条目 ID
 /memory checkpoints          # 列出最近压缩恢复检查点
 /memory search <关键词>       # 中文/英文搜索
 /memory show <id>            # 查看条目（知识/归档/提案）
 /memory delete <id>          # 删除（需 UI 确认；无 UI 拒绝）
 /memory clear <bucket>       # 清空 knowledge|archive|proposals（需 UI 确认）
-/memory approve [pid]        # 无 pid 列待审批；有 pid 走 ctx.ui.confirm 审批发布
+/memory approve [pid]        # 无 pid 打开待审批选择弹窗；选择后展示全文并二次确认
 /memory reject <pid>         # 拒绝（丢弃）提案
 ```
+
+### 浏览 UI（无需条目 ID）
+
+`/memory list` 使用 Pi 原生选择弹窗，支持 Pi Web 和终端交互模式：
+- 先选项目知识、工作交接、归档或待审批技能，再按标题选择。
+- 列表每页10条，正文按4,000字符分页；支持上一页、下一页、返回和关闭。
+- 待审批提案详情可进入审批，但“选择提案”本身不是批准；必须在后续全文确认弹窗中确认。
+- 取消/关闭不改数据，不触发模型回合，不往会话历史追加浏览内容。
+- 无交互UI的 print/json 模式不打开浏览/审批弹窗。
+
+`/memory` 仍提供简洁状态面板。Web 默认将面板折叠在底栏，提示会明确指出展开位置；希望直接浏览请用 `/memory list`。
 
 ### skill 审批流程（防滥用设计）
 
 1. 模型调用 `project_memory_propose_skill` → 提案进入 store（不写任何 skill 文件）。
-2. 用户运行 `/memory approve <pid>` → `ctx.ui.confirm` 二次确认（显示名称/类型/目标路径/完整正文/覆盖警告）。
+2. 用户运行 `/memory approve` 按名称选择（也可从 `/memory list` 进入提案详情），或直接 `/memory approve <pid>` → `ctx.ui.confirm` 二次确认（显示名称/类型/目标路径/完整正文/覆盖警告）。
 3. 批准 → 安全写入 `<项目根>/.pi/skills/<name>/SKILL.md`（名称白名单正则、路径包含性 + realpath
    校验、O_EXCL 创建、符号链接一律拒绝），登记进 managedSkills 清单。
 4. 批准**不自动 reload**：提示手动 `/reload` 或 `/new` 生效。

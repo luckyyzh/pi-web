@@ -1,6 +1,6 @@
 {
   "name": "project-memory",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "pi 项目记忆扩展：项目知识 + 工作交接（无全局记忆，缓存友好，容量有界，skill 发布需用户审批）",
   "type": "module",
