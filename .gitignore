@@ -21,6 +21,9 @@
 # production
 /build
 
+# local Pi workspace data
+/.pi/
+
 # misc
 .DS_Store
 *.pem
