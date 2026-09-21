@@ -1,0 +1,31 @@
+{
+  "name": "project-memory",
+  "version": "0.2.0",
+  "private": true,
+  "description": "pi 项目记忆扩展：项目知识 + 工作交接（无全局记忆，缓存友好，容量有界，skill 发布需用户审批）",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test \"test/*.test.js\"",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "jiti": "^2.7.0",
+    "typescript": "^5",
+    "@types/node": "^25"
+  }
+}
