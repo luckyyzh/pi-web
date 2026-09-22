@@ -24,6 +24,7 @@ import {
   addProposal,
   archiveKnowledge,
   clearBucket,
+  clearHandoff,
   loadConfig,
   loadStore,
   makeFallbackHandoff,
@@ -77,6 +78,8 @@ interface SessionState {
   shadow: boolean;
   disabledReason: string | null;
   corruptedWarned: boolean;
+  /** 本会话内用户显式清空过 handoff（/memory clear handoff）：退出兜底不再回填空槽位 */
+  handoffCleared: boolean;
 }
 
 /* ---------- 展示辅助 ---------- */
@@ -182,6 +185,7 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
       shadow,
       disabledReason: !config.enabled ? `配置 enabled:false（${configPath}）` : !trusted ? "项目未受信（仅受信项目启用）" : null,
       corruptedWarned: false,
+      handoffCleared: false,
     };
   }
 
@@ -337,13 +341,16 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
   /**
    * 退出兜底：仅 quit、完全没有显式 handoff、且本会话有文件修改证据时，
    * 写一条「原始、未核实」兜底交接（最后一条用户消息摘录，bounded）。
-   * 纯对话 / 纯只读检索的会话不写（避免把闲聊的最后一句话当成交接）。
+   * 纯对话 / 纯只读检索的会话不写（避免把闲聊的最后一句话当成交接）；
+   * 用户本会话显式清空过 handoff（/memory clear handoff）也不回写。
    */
   pi.on("session_shutdown", async (event, ctx) => {
     if (event.reason !== "quit") return;
     try {
       const st = await ensureState(ctx);
       if (st.disabledReason) return;
+      // 用户已显式清空：尊重其意图，本会话退出不再回填空槽位。
+      if (st.handoffCleared) return;
       const entries: Array<{ type?: string; message?: { role?: string; content?: unknown } }> =
         (ctx.sessionManager?.getBranch?.() ?? ctx.sessionManager?.getEntries?.() ?? []) as Array<{ type?: string; message?: { role?: string; content?: unknown } }>;
       // 证据判定与交接提醒一致：成功的 write/edit/apply_patch 或独立 git commit 才算改过文件。
@@ -687,16 +694,24 @@ export default function projectMemoryExtension(pi: ExtensionAPI) {
             break;
           }
           case "clear": {
-            const bucket = arg as "knowledge" | "archive" | "proposals";
-            if (!["knowledge", "archive", "proposals"].includes(bucket)) throw new Error("用法：/memory clear <knowledge|archive|proposals>");
+            const bucket = arg as "knowledge" | "archive" | "proposals" | "handoff";
+            if (!["knowledge", "archive", "proposals", "handoff"].includes(bucket)) throw new Error("用法：/memory clear <knowledge|archive|proposals|handoff>");
             if (!ctx.hasUI) throw new Error("clear 需要交互 UI 确认（当前模式无 UI，已拒绝）");
             const warning =
               bucket === "archive"
                 ? "archive 清空是释放归档预算的途径（active 与 archive 同时满时用它避免锁死）。确认清空全部归档？"
-                : `确认清空全部 ${bucket}？该操作不可撤销。`;
+                : bucket === "handoff"
+                  ? "将删除当前工作交接记录（下次新会话不再注入），且本会话的退出兜底不会回写。确认清空？"
+                  : `确认清空全部 ${bucket}？该操作不可撤销。`;
             const ok = await ctx.ui.confirm(`清空 ${bucket}？`, warning);
             if (!ok) {
               safeNotify(ctx, "已取消", "info");
+              break;
+            }
+            if (bucket === "handoff") {
+              await mutate(ctx, st, (s) => clearHandoff(s));
+              st.handoffCleared = true;
+              safeNotify(ctx, "已清空工作交接（本会话退出兜底不会回写）", "info");
               break;
             }
             await mutate(ctx, st, (s) => clearBucket(s, bucket));

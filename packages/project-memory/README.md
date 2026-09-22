@@ -15,6 +15,7 @@
 - **退出兜底不是保存保证**：进程退出（quit）时，若项目存储中完全没有交接，且本会话确实改过文件
   （`write`/`edit`/`apply_patch`，或独立 `git commit`；与交接提醒同一判定），才写一条
   「原始、未核实」的兜底记录（最后一条用户消息的摘录，bounded）；纯对话、纯只读检索的会话不写。
+  用户用 `/memory clear handoff` 显式清空后，该会话退出时也不回写。
   模型没主动保存的内容不会被总结。
 - 压缩前先验证原始 JSONL 与当前分支叶节点已落盘，再建立恢复检查点。失败时取消压缩（含 overflow），明确报错，不静默继续无保护压缩。正常路径不修改原压缩请求，也不额外调用模型。
 - 压缩成功后复用 Pi 的压缩摘要更新有界交接，并追加一条短恢复入口消息；不覆盖检查点建立后被并发显式更新的交接。摘要有损，细节依靠原文回查。
@@ -132,7 +133,7 @@ Copy-Item -Recurse C:\绝对路径\pi-web\packages\project-memory $env:USERPROFI
 /memory search <关键词>       # 中文/英文搜索
 /memory show <id>            # 查看条目（知识/归档/提案）
 /memory delete <id>          # 删除（需 UI 确认；无 UI 拒绝）
-/memory clear <bucket>       # 清空 knowledge|archive|proposals（需 UI 确认）
+/memory clear <bucket>       # 清空 knowledge|archive|proposals|handoff（需 UI 确认；handoff 清空后本会话退出时不回写）
 /memory approve [pid]        # 无 pid 打开待审批选择弹窗；选择后展示全文并二次确认
 /memory reject <pid>         # 拒绝（丢弃）提案
 ```
@@ -208,4 +209,4 @@ npm --prefix packages/project-memory run typecheck
 - 审批的「文件已写、store 未写成功」极端残留状态（补偿回滚也失败/进程崩溃）需人工核对，见审批安全细节。
 - 影子工作区（`~/.pi/remote/*`）记忆为本地持久化，**不**同步到远程仓库。
 - `/resume` 不会重新注入交接（续接会话自带历史）；如需刷新交接请手动 `project_memory_save(kind:"handoff")`。
-- 退出兜底仅覆盖「本会话改过文件、且完全没有交接」的场景，且标记未核实；不承诺退出时保存模型上下文。
+- 退出兜底仅覆盖「本会话改过文件、且完全没有交接、且用户未显式清空过」的场景，且标记未核实；不承诺退出时保存模型上下文。

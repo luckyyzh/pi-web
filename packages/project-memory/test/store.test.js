@@ -12,6 +12,7 @@ import {
   DEFAULT_CONFIG,
   archiveKnowledge,
   clearBucket,
+  clearHandoff,
   emptyStore,
   loadConfig,
   loadStore,
@@ -229,6 +230,16 @@ test("makeFallbackHandoff: 仅当无 handoff 时创建，标记未核实，截�
   assert.ok(s3.handoff.content.includes("截断"));
   // 空文本 → 不创建
   assert.equal(makeFallbackHandoff(emptyStore(), cfg, "   ").created, false);
+});
+
+test("clearHandoff: 只清 handoff 槽位；空槽位 no-op 返回原对象", () => {
+  const cfg = smallConfig();
+  let store = saveHandoff(emptyStore(), cfg, { title: "进行中", content: "修登录页" }).store;
+  store = saveKnowledge(store, cfg, { title: "事实", content: "x" }).store;
+  const cleared = clearHandoff(store).store;
+  assert.equal(cleared.handoff, null);
+  assert.equal(cleared.knowledge.length, 1, "不影响其它桶");
+  assert.equal(clearHandoff(cleared).store, cleared, "空槽位不克隆、不落盘");
 });
 
 /* ---------------- 持久化：原子写 / 损坏备份 / 往返 ---------------- */

@@ -242,6 +242,34 @@ run("扩展冒烟：注册、存储、交接、审批、影子禁用", async (t)
     assert.equal(onDisk3?.handoff ?? null, null, "纯对话会话不得生成兜底交接");
   });
 
+  await t.test("/memory clear handoff：清槽成功且本会话退出不回写", async () => {
+    const root4 = join(tmpRoot, "clear-project");
+    await mkdir(root4, { recursive: true });
+    const pi4 = makeMockPi(root4);
+    factory(pi4);
+    const ctx4 = makeCtx({
+      cwd: root4,
+      confirm: true,
+      entries: [
+        { type: "message", message: { role: "user", content: "帮我修登录页" } },
+        { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "edit", arguments: { path: "login.css" } }] } },
+      ],
+    });
+    await fire(pi4, "session_start", { reason: "startup" }, ctx4);
+    // 先有显式交接
+    await pi4.tools.get("project_memory_save").execute("t-clear-1", { kind: "handoff", title: "进行中", content: "修登录页" }, undefined, undefined, ctx4);
+    let onDisk4 = JSON.parse(await readFile(join(root4, ".pi", "project-memory", "store.json"), "utf8"));
+    assert.equal(onDisk4.handoff.title, "进行中");
+    // 显式清空
+    await pi4.commands.get("memory").handler("clear handoff", ctx4);
+    onDisk4 = JSON.parse(await readFile(join(root4, ".pi", "project-memory", "store.json"), "utf8"));
+    assert.equal(onDisk4.handoff, null, "清空后槽位应为空");
+    // 退出：有文件修改证据但用户已显式清空 → 不回填
+    await fire(pi4, "session_shutdown", { reason: "quit" }, ctx4);
+    onDisk4 = JSON.parse(await readFile(join(root4, ".pi", "project-memory", "store.json"), "utf8"));
+    assert.equal(onDisk4.handoff, null, "显式清空后，退出不得回写");
+  });
+
   await t.test("skill 提案 → 用户确认发布（SKILL.md 落盘、清单登记、提案移除）", async () => {
     const ctx = makeCtx();
     const p = await pi.tools.get("project_memory_propose_skill").execute(

@@ -643,6 +643,17 @@ export function clearBucket(store: Store, bucket: "knowledge" | "archive" | "pro
   return { store: next };
 }
 
+/**
+ * 清空 handoff 槽位（用户显式操作 /memory clear handoff）。
+ * 不影响其它桶；空槽位原样返回（不落盘）。
+ */
+export function clearHandoff(store: Store): { store: Store } {
+  if (!store.handoff) return { store };
+  const next = structuredClone(store);
+  next.handoff = null;
+  return { store: next };
+}
+
 /* ---------------- 已发布 skill 清单（bounded：数量 + 总字节） ---------------- */
 
 /** 登记/更新已发布 skill。预算不足时抛 BudgetError（先退休旧 skill 或精简内容）。 */
