@@ -1,7 +1,7 @@
 /**
  * test/extension.smoke.test.js — 扩展入口冒烟测试（jiti 加载 TS + mock ExtensionAPI）。
  * 验证：工具/命令注册、git 子目录项目根、保存/搜索/合并/归档、新会话交接注入（一次持久消息）、
- * 退出兜底、skill 提案→用户确认发布（含拒绝路径）、影子工作区禁用发布。
+ * 退出兜底（需文件修改证据）、skill 提案→用户确认发布（含拒绝路径）、影子工作区禁用发布。
  * jiti 缺失时自动跳过（核心逻辑测试不依赖 jiti）。
  */
 import { test, before } from "node:test";
@@ -200,7 +200,7 @@ run("扩展冒烟：注册、存储、交接、审批、影子禁用", async (t)
     assert.match(onDisk.handoff.title, /登录页重构进行中/);
   });
 
-  await t.test("session_shutdown(quit)：无 handoff → 写原始未核实兜底（bounded）", async () => {
+  await t.test("session_shutdown(quit)：无 handoff 且有文件修改 → 写原始未核实兜底（bounded）", async () => {
     const root2 = join(tmpRoot, "second-project");
     await mkdir(root2, { recursive: true });
     const pi2 = makeMockPi(root2);
@@ -209,7 +209,7 @@ run("扩展冒烟：注册、存储、交接、审批、影子禁用", async (t)
       cwd: root2,
       entries: [
         { type: "message", message: { role: "user", content: "帮我修一下登录页的样式" } },
-        { type: "message", message: { role: "assistant", content: "好的" } },
+        { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "edit", arguments: { path: "login.css" } }] } },
       ],
     });
     await fire(pi2, "session_start", { reason: "startup" }, ctx);
@@ -218,6 +218,28 @@ run("扩展冒烟：注册、存储、交接、审批、影子禁用", async (t)
     assert.equal(onDisk.handoff.verified, false);
     assert.equal(onDisk.handoff.source, "auto-fallback");
     assert.match(onDisk.handoff.content, /帮我修一下登录页的样式/);
+  });
+
+  await t.test("session_shutdown(quit)：无 handoff 且无文件修改证据 → 不写兜底（闲聊/只读）", async () => {
+    const root3 = join(tmpRoot, "chat-project");
+    await mkdir(root3, { recursive: true });
+    const pi3 = makeMockPi(root3);
+    factory(pi3);
+    const ctx3 = makeCtx({
+      cwd: root3,
+      entries: [
+        { type: "message", message: { role: "user", content: "哪里来的伞" } },
+        { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "read", arguments: { path: "poem.md" } }] } },
+      ],
+    });
+    await fire(pi3, "session_start", { reason: "startup" }, ctx3);
+    await fire(pi3, "session_shutdown", { reason: "quit" }, ctx3);
+    const storeFile3 = join(root3, ".pi", "project-memory", "store.json");
+    const onDisk3 = await readFile(storeFile3, "utf8").then(
+      (s) => JSON.parse(s),
+      () => null,
+    );
+    assert.equal(onDisk3?.handoff ?? null, null, "纯对话会话不得生成兜底交接");
   });
 
   await t.test("skill 提案 → 用户确认发布（SKILL.md 落盘、清单登记、提案移除）", async () => {

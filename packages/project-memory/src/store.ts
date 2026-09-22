@@ -101,6 +101,7 @@ export interface Store {
 export interface MemoryConfig {
   enabled: boolean;
   checkpoint: { enabled: boolean };
+  handoffReminder: { enabled: boolean };
   budgets: {
     knowledge: { maxEntries: number; maxChars: number };
     handoff: { maxChars: number };
@@ -115,6 +116,7 @@ export interface MemoryConfig {
 export const DEFAULT_CONFIG: MemoryConfig = {
   enabled: true,
   checkpoint: { enabled: true },
+  handoffReminder: { enabled: true },
   budgets: {
     knowledge: { maxEntries: 100, maxChars: 48000 },
     handoff: { maxChars: 4000 },
@@ -144,6 +146,7 @@ export async function loadConfig(configPath: string): Promise<MemoryConfig> {
   const obj = raw as Record<string, unknown>;
   if (obj.enabled === false) d.enabled = false;
   if (obj.checkpoint && typeof obj.checkpoint === "object" && (obj.checkpoint as { enabled?: unknown }).enabled === false) d.checkpoint.enabled = false;
+  if (obj.handoffReminder && typeof obj.handoffReminder === "object" && (obj.handoffReminder as { enabled?: unknown }).enabled === false) d.handoffReminder.enabled = false;
   const b = obj.budgets;
   if (b && typeof b === "object" && !Array.isArray(b)) {
     const bo = b as Record<string, unknown>;
