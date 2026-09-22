@@ -1,4 +1,5 @@
 import { defaultUrlTransform, type Options as ReactMarkdownOptions } from "react-markdown";
+import remarkCjkFriendly from "remark-cjk-friendly/parseOnly";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
@@ -359,16 +360,27 @@ function isLikelyMathExpression(value: string): boolean {
 // singleTilde:false requires ~~double~~ tildes for strikethrough. A single `~`
 // is the standard CJK numeric-range separator (e.g. "5~7U", "100~200倍"), and
 // GFM's default single-tilde strikethrough silently mangled such ranges (#385).
+//
+// remarkCjkFriendly (parseOnly entry: this app only parses, never stringifies)
+// fixes CommonMark's CJK emphasis limitation (spec issue #650): a closing **
+// directly preceded by CJK punctuation (》）】…。) and directly followed by a
+// CJK character can never close under the stock flanking rules, so model text
+// like 随**手游《梦幻诛仙》**上线 would render literal asterisks. It implements
+// the spec-draft CJK rules at the micromark level; Latin behavior is unchanged.
+// Known limitation: GFM strikethrough adjacent to CJK (~~x》~~) is not covered
+// (would need the companion remark-cjk-friendly-gfm-strikethrough package).
 const remarkGfmOptions = { singleTilde: false } as const;
 
 export const markdownRemarkPlugins: ReactMarkdownOptions["remarkPlugins"] = [
   [remarkFrontmatter, ["yaml"]],
   [remarkGfm, remarkGfmOptions],
+  remarkCjkFriendly,
   remarkMath,
 ];
 export const markdownPreviewRemarkPlugins: ReactMarkdownOptions["remarkPlugins"] = [
   [remarkFrontmatter, ["yaml"]],
   [remarkGfm, remarkGfmOptions],
+  remarkCjkFriendly,
   remarkMath,
 ];
 
